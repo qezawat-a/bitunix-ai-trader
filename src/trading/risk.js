@@ -111,6 +111,87 @@ export function maxSafeLeverage({ entry, slDist, mmr = 0.005, buffer = 0.25 }) {
   return Math.max(1, Math.floor(lev));
 }
 
+/**
+ * Choose a target from what the tape is actually doing, instead of a fixed
+ * multiple of the stop.
+ *
+ * A fixed R target has one failure mode in each direction: in chop it asks for
+ * a move that is not coming, and in a real trend it hands back the part of the
+ * move that pays for all the losers. On 20x a 3R target is roughly 100% ROI
+ * and the trade is closed — a 25% price run that would have been 500% never
+ * gets the chance.
+ *
+ * So the target widens only when there is evidence to justify it:
+ *
+ *   strong trend, expanding range   -> NO fixed target; the trailing stop
+ *                                      decides when the move is over
+ *   trend, but ordinary             -> wide R, scaled by trend strength
+ *   squeeze breaking out            -> the measured move (the coiled range
+ *                                      projected from the break)
+ *   range                           -> the opposite band, and nothing beyond;
+ *                                      a range is the one place a runner is
+ *                                      simply wrong
+ *   weak / no trend                 -> tight, take what is there
+ *
+ * Returns { tpPrice|null, rr, basis }. A null tpPrice means "let it run" and
+ * the caller must ensure a trailing stop is active, otherwise the position has
+ * no exit at all.
+ */
+export function adaptiveTarget({
+  side, price, slDist, regime, adx = 0, atrExpansion = 1,
+  donHigh = null, donLow = null, trailingEnabled = true,
+}) {
+  const isLong = side === 'LONG';
+  const aligned = isLong ? regime === 'TREND_UP' : regime === 'TREND_DOWN';
+  const rrTo = (target) => Math.abs(target - price) / slDist;
+  const mk = (target, basis) => ({ tpPrice: target, rr: rrTo(target), basis });
+
+  // --- 1. the runner ------------------------------------------------------
+  // Strong directional trend AND a range that is still opening up. Both are
+  // required: high ADX on a contracting range is a trend running out of fuel.
+  if (aligned && adx >= 30 && atrExpansion >= 1.15) {
+    if (trailingEnabled) {
+      return { tpPrice: null, rr: null, basis: `trend ADX ${adx.toFixed(0)}, range expanding ${atrExpansion.toFixed(2)}x — no fixed target, trailing it` };
+    }
+    // Without a trailing stop an open-ended target is an open-ended position.
+    const t = isLong ? price + slDist * 8 : price - slDist * 8;
+    return mk(t, `strong trend but trailing is off — capped at 8R`);
+  }
+
+  // --- 2. range: the other side of the box, never past it -----------------
+  if (regime === 'RANGE' && donHigh != null && donLow != null) {
+    const band = isLong ? donHigh : donLow;
+    const rr = rrTo(band);
+    // if the band is closer than the stop the trade is not worth taking on
+    // structure alone; fall back to a modest multiple
+    if (rr >= 1.2) return mk(band, `range — opposite band at ${band.toFixed(6)}`);
+    return mk(isLong ? price + slDist * 1.5 : price - slDist * 1.5, 'range, band too close — 1.5R');
+  }
+
+  // --- 3. squeeze break: the measured move --------------------------------
+  if (regime === 'SQUEEZE' && donHigh != null && donLow != null) {
+    const height = donHigh - donLow;
+    if (height > 0) {
+      const t = isLong ? price + height : price - height;
+      const rr = rrTo(t);
+      if (rr >= 1.5) return mk(t, `squeeze — measured move ${height.toFixed(6)}`);
+    }
+  }
+
+  // --- 4. trending, ordinary ----------------------------------------------
+  if (aligned) {
+    // ADX 22 -> 3R, ADX 30 -> 5R, flattening off above that
+    const rr = clamp(3 + (adx - 22) * 0.25, 3, 5);
+    return mk(isLong ? price + slDist * rr : price - slDist * rr,
+      `trend ADX ${adx.toFixed(0)} — ${rr.toFixed(1)}R`);
+  }
+
+  // --- 5. nothing to lean on ----------------------------------------------
+  const rr = adx < 20 ? 1.5 : 2.2;
+  return mk(isLong ? price + slDist * rr : price - slDist * rr,
+    `no aligned trend (ADX ${adx.toFixed(0)}) — ${rr}R`);
+}
+
 export function computeDynamicTpSl(signal) {
   const s = settings();
   const price = Number(signal.price);
@@ -171,9 +252,30 @@ export function computeDynamicTpSl(signal) {
     }
   }
 
-  const tpDist = slDist * rr;
   const slPrice = isLong ? price - slDist : price + slDist;
-  const tpPrice = isLong ? price + tpDist : price - tpDist;
+
+  // tp_mode ADAPTIVE lets the target come from the tape; FIXED_R keeps the
+  // original behaviour of a confidence-scaled multiple of the stop.
+  let tpPrice;
+  let tpBasis;
+  let effRr = rr;
+  if (String(s.tp_mode || 'ADAPTIVE').toUpperCase() === 'ADAPTIVE') {
+    const t = adaptiveTarget({
+      side: signal.side, price, slDist, regime,
+      adx: Number(signal.adx) || 0,
+      atrExpansion: Number(signal.atrExpansion) || 1,
+      donHigh: signal.donHigh ?? null,
+      donLow: signal.donLow ?? null,
+      trailingEnabled: true,
+    });
+    tpPrice = t.tpPrice;
+    tpBasis = t.basis;
+    effRr = t.rr;
+  } else {
+    tpPrice = isLong ? price + slDist * rr : price - slDist * rr;
+    tpBasis = `fixed ${rr.toFixed(2)}R`;
+  }
+  const tpDist = tpPrice == null ? null : Math.abs(tpPrice - price);
   const safeLev = maxSafeLeverage({ entry: price, slDist: atr * kSl, mmr });
 
   return {
@@ -181,6 +283,8 @@ export function computeDynamicTpSl(signal) {
     tpPrice,
     slDist,
     tpDist,
+    tpBasis,
+    rr: effRr == null ? null : Number(effRr.toFixed(2)),
     liqPrice,
     liqAdjusted,
     liqNote,
@@ -188,12 +292,13 @@ export function computeDynamicTpSl(signal) {
     maxSafeLeverage: safeLev,
     mmr,
     kSl: Number(kSl.toFixed(2)),
-    rr: Number(rr.toFixed(2)),
+    baseRr: Number(rr.toFixed(2)),
     strength: Number(strength.toFixed(2)),
     slPct: Number(((slDist / price) * 100).toFixed(3)),
-    tpPct: Number(((tpDist / price) * 100).toFixed(3)),
-    explain: `ATR ${atr.toFixed(6)} x ${kSl.toFixed(2)} stop, ${rr.toFixed(2)}R target `
-      + `(strength ${(strength * 100).toFixed(0)}%, regime ${regime})`
+    tpPct: tpDist == null ? null : Number(((tpDist / price) * 100).toFixed(3)),
+    explain: `ATR ${atr.toFixed(6)} x ${kSl.toFixed(2)} stop, `
+      + (tpPrice == null ? 'NO fixed target (trailing)' : `${effRr.toFixed(2)}R target`)
+      + ` — ${tpBasis} (strength ${(strength * 100).toFixed(0)}%, regime ${regime})`
       + (liqAdjusted ? ` — STOP PULLED INSIDE LIQUIDATION: ${liqNote}` : ''),
   };
 }

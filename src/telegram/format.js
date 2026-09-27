@@ -195,6 +195,7 @@ export const SETTING_INFO = {
   max_open_positions:       ['Hard ceiling on concurrent positions.', '1 – 50'],
   symbols:                  ['AUTO ranks every tradable pair by volume; or a comma list.', 'AUTO / BTCUSDT,ETHUSDT'],
   universe_size:            ['How many symbols AUTO keeps in the scan universe, best first. The rest of the 685 pairs are ignored.', '1 – 200'],
+  tp_mode:                  ['ADAPTIVE reads the tape: a strong expanding trend gets NO fixed target and exits on the trailing stop, a range targets the opposite band, chop takes a tight 1.5R. FIXED_R is a confidence-scaled multiple of the stop, the old behaviour.', 'ADAPTIVE | FIXED_R'],
   tpsl_method:              ['How a new position is protected. POSITION = one TP/SL closing all of it. PARTIAL = a scale-out ladder on top, banking profit in stages with a runner left on.', 'POSITION | PARTIAL'],
   partial_tp_ladder:        ['The scale-out ladder, as share@R pairs. "40@1,35@2,25@3" closes 40% at 1R, 35% at 2R, 25% at 3R. Shares must sum to 100 or less; whatever is left rides as the runner.', 'e.g. 40@1,35@2,25@3'],
   trailing_method:          ['ATR = stop sits N ATR behind price. RATIO = exchange-style callback, a percentage retrace from the best price. INTERVAL = the same but an absolute price distance.', 'ATR | RATIO | INTERVAL'],
@@ -237,7 +238,7 @@ export const SETTING_INFO = {
 
 const SETTING_GROUPS = {
   'Trading':     ['auto_trade', 'leverage', 'margin_mode', 'position_mode', 'order_unit', 'margin_pct', 'max_open_positions', 'symbols', 'universe_rank', 'universe_size', 'min_24h_volume_usd', 'timeframes'],
-  'TP / SL':     ['tpsl_method', 'partial_tp_ladder', 'trailing_method', 'trailing_callback', 'trailing_distance_atr', 'trailing_trigger_roi_pct', 'breakeven_threshold', 'account_tp_usdt', 'account_sl_usdt'],
+  'TP / SL':     ['tp_mode', 'tpsl_method', 'partial_tp_ladder', 'trailing_method', 'trailing_callback', 'trailing_distance_atr', 'trailing_trigger_roi_pct', 'breakeven_threshold', 'account_tp_usdt', 'account_sl_usdt'],
   'Signal gates': ['min_agreement', 'min_confidence', 'tf_min_confidence', 'signal_confirm_scans', 'cooldown_min'],
   'Reversal':    ['reversal_enabled', 'reversal_confidence'],
   'Protection':  ['breakeven_threshold', 'trailing_trigger_roi_pct', 'trailing_distance_atr'],

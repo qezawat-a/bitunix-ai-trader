@@ -322,6 +322,7 @@ export async function analyseSymbol(symbol) {
 
   const perTf = {};
   let baseRegime = null, baseAtr = null, price = null;
+  let baseAdx = 0, baseAtrExpansion = 1, baseDonHigh = null, baseDonLow = null;
 
   for (const tf of tfs) {
     let candles;
@@ -346,10 +347,24 @@ export async function analyseSymbol(symbol) {
     };
 
     // the *first* (lowest) timeframe is the execution timeframe
-    if (!baseRegime) { baseRegime = reg.regime; baseAtr = a; price = I.last(closes); }
+    if (!baseRegime) {
+      baseRegime = reg.regime; baseAtr = a; price = I.last(closes);
+      // features the adaptive target needs: how strong the trend is, whether
+      // the range is still opening up, and where the structural walls are
+      baseAdx = Number(reg.adx) || 0;
+      const atrSeries = I.atr(highs, lows, closes, 14);
+      const past = atrSeries[atrSeries.length - 21];
+      baseAtrExpansion = past > 0 ? a / past : 1;
+      const don = I.donchian(highs, lows, 20);
+      baseDonHigh = I.last(don.upper);
+      baseDonLow = I.last(don.lower);
+    }
   }
 
-  return { symbol, timeframes: perTf, regime: baseRegime, atr: baseAtr, price, depth, funding };
+  return {
+    symbol, timeframes: perTf, regime: baseRegime, atr: baseAtr, price, depth, funding,
+    adx: baseAdx, atrExpansion: baseAtrExpansion, donHigh: baseDonHigh, donLow: baseDonLow,
+  };
 }
 
 /**

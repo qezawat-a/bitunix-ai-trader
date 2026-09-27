@@ -209,8 +209,12 @@ export async function openFromSignal(signal, { aiVerdict = null, marginOverride 
     ...signal, price, leverage, maxLeverage: Number(info?.maxLeverage), mmr: realMmr,
   });
   if (risk.liqAdjusted) log.warn(`${symbol}: ${risk.liqNote}`);
-  const tpPrice = await bitunix.roundPrice(symbol, risk.tpPrice);
+  // A null tpPrice is deliberate: in ADAPTIVE mode a strong, expanding trend
+  // gets NO fixed target so the trailing stop can decide when the move ends.
+  // The stop is never optional.
+  const tpPrice = risk.tpPrice == null ? null : await bitunix.roundPrice(symbol, risk.tpPrice);
   const slPrice = await bitunix.roundPrice(symbol, risk.slPrice);
+  if (tpPrice == null) log.info(`${symbol}: no fixed TP — ${risk.tpBasis}`);
 
   const isLong = signal.side === 'LONG';
   const clientId = `aria${Date.now().toString(36)}`;
@@ -221,13 +225,15 @@ export async function openFromSignal(signal, { aiVerdict = null, marginOverride 
     side: isLong ? 'BUY' : 'SELL',
     orderType: 'MARKET',
     clientId,
-    tpPrice,
-    tpStopType: 'MARK_PRICE',
-    tpOrderType: 'MARKET',
     slPrice,
     slStopType: 'MARK_PRICE',
     slOrderType: 'MARKET',
   };
+  if (tpPrice != null) {
+    order.tpPrice = tpPrice;
+    order.tpStopType = 'MARK_PRICE';
+    order.tpOrderType = 'MARKET';
+  }
   if (String(s.position_mode).toUpperCase() === 'HEDGE') order.tradeSide = 'OPEN';
 
   let res;
@@ -270,7 +276,7 @@ export async function openFromSignal(signal, { aiVerdict = null, marginOverride 
 
   const tradeId = await openTrade({
     clientId, symbol, side: signal.side, entryPrice: price, qty: filledQty,
-    leverage, marginMode: s.margin_mode, marginUsdt: sized.cost, tpPrice: Number(tpPrice),
+    leverage, marginMode: s.margin_mode, marginUsdt: sized.cost, tpPrice: tpPrice == null ? null : Number(tpPrice),
     slPrice: Number(slPrice), atr: signal.atr, confidence: signal.confidence,
     agreement: signal.agreement, strategies: signal.strategies?.map((x) => x.name) || [],
     reasoning: aiVerdict?.reasoning || risk.explain,
@@ -324,7 +330,7 @@ export async function openFromSignal(signal, { aiVerdict = null, marginOverride 
     ok: true, tradeId, positionId, orderId: res?.orderId, clientId,
     symbol, side: signal.side, qty: filledQty, price, leverage,
     marginUsdt: sized.cost, nominalUsdt: sized.nominal, orderUnit: unit,
-    tpPrice: Number(tpPrice), slPrice: Number(slPrice), risk, ladder,
+    tpPrice: tpPrice == null ? null : Number(tpPrice), slPrice: Number(slPrice), risk, ladder,
   };
 }
 

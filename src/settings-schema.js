@@ -55,6 +55,7 @@ const ENUMS = {
   position_mode: ['HEDGE', 'ONE_WAY'],
   order_unit: ['NOMINAL', 'COST', 'QTY'],
   universe_rank: ['VOLUME', 'GAINERS', 'LOSERS', 'MOVERS'],
+  tp_mode: ['ADAPTIVE', 'FIXED_R'],
   tpsl_method: ['POSITION', 'PARTIAL'],
   trailing_method: ['ATR', 'RATIO', 'INTERVAL'],
   thinking_level: ['off', 'low', 'medium', 'high'],

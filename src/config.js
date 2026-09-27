@@ -87,6 +87,7 @@ export const config = {
     trailing_trigger_roi_pct: num(process.env.TRAILING_TRIGGER_ROI_PCT, 25),
     trailing_distance_atr: num(process.env.TRAILING_DISTANCE_ATR, 0.5),
     // --- the four TP/SL methods (help centre id=290) ---
+    tp_mode: str(process.env.TP_MODE, 'ADAPTIVE').toUpperCase(),                 // ADAPTIVE | FIXED_R
     tpsl_method: str(process.env.TPSL_METHOD, 'POSITION').toUpperCase(),       // POSITION | PARTIAL
     partial_tp_ladder: str(process.env.PARTIAL_TP_LADDER, '40@1,35@2,25@3'),   // share@R, share@R
     trailing_method: str(process.env.TRAILING_METHOD, 'ATR').toUpperCase(),    // ATR | RATIO | INTERVAL
