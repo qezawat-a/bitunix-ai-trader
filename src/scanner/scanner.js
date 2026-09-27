@@ -90,16 +90,25 @@ export async function getCandles(symbol, interval, limit = 400) {
     all = merged.sort((a, b) => a.time - b.time);
   }
 
-  const candles = all.slice(-limit);
+  let candles = all.slice(-limit);
 
-  // Sanity-check the series. Bitunix occasionally omits a bar from a large
-  // page that it will happily return in a small one, which silently corrupts
-  // every indicator downstream (a missing bar shifts EMA/ATR/ADX periods).
-  // Log it loudly rather than trading on quietly wrong data.
+  // Bitunix drops bars from large pages. Measured across BTC/ETH/SOL/DOGE on
+  // 5m and 15m: a 200-row page requested WITHOUT endTime is always complete,
+  // while the paged-back request always came back exactly one bar short — and
+  // re-asking for the same window with limit 50 returns the missing bar 7
+  // times out of 8. So most of these holes are an artefact of the page size,
+  // not absent history, and they are repairable.
+  //
+  // This matters beyond tidiness: a missing bar shifts every EMA/ATR/ADX
+  // period after it, so the indicators were quietly reading slightly wrong
+  // series on every symbol.
+  // re-slice: a repair can push the series one bar over the requested length
+  candles = (await backfillGaps(symbol, interval, candles)).slice(-limit);
+
+  // Whatever survives the backfill is genuine missing history (an exchange
+  // outage). Report it once per shape rather than on every scan pass.
   const gaps = countGaps(candles, interval);
-  if (gaps.missing > 0) {
-    log.warn(`${symbol} ${interval}: ${gaps.missing} missing bar(s) in ${candles.length} (worst gap ${gaps.worst}x)`);
-  }
+  if (gaps.missing > 0) reportGaps(symbol, interval, candles.length, gaps);
 
   klineCache.set(key, { at: Date.now(), candles });
   return candles;
@@ -107,6 +116,82 @@ export async function getCandles(symbol, interval, limit = 400) {
 
 
 /** How many bars are missing from an otherwise contiguous series. */
+/**
+ * Re-fetch the windows around any holes with a small page size and merge back
+ * whatever the exchange returns that time.
+ *
+ * Capped at MAX_REPAIRS windows per call so a badly broken series costs a
+ * bounded number of extra requests rather than hammering the endpoint.
+ */
+let repairCount = 0;   // bars recovered this process, surfaced by /status
+export function klineRepairCount() { return repairCount; }
+
+const REPAIR_PAGE = 50;
+const MAX_REPAIRS = 4;
+
+async function backfillGaps(symbol, interval, candles) {
+  const step = (TF_MINUTES[interval] || 0) * 60_000;
+  if (!step || candles.length < 2) return candles;
+
+  const holes = [];
+  for (let i = 1; i < candles.length; i++) {
+    if (Math.round((candles[i].time - candles[i - 1].time) / step) > 1) {
+      holes.push({ after: candles[i - 1].time, before: candles[i].time });
+    }
+  }
+  if (!holes.length) return candles;
+
+  const byTime = new Map(candles.map((c) => [c.time, c]));
+  let recovered = 0;
+  for (const hole of holes.slice(0, MAX_REPAIRS)) {
+    try {
+      const page = normaliseKlines(await bitunix.getKline({
+        symbol, interval, limit: REPAIR_PAGE, endTime: hole.before - 1,
+      }));
+      for (const c of page) {
+        if (c.time > hole.after && c.time < hole.before && !byTime.has(c.time)) {
+          byTime.set(c.time, c);
+          recovered++;
+        }
+      }
+    } catch {
+      // a failed repair just leaves the hole; never let this break a scan
+    }
+  }
+  if (!recovered) return candles;
+
+  repairCount += recovered;
+  return [...byTime.values()].sort((a, b) => a.time - b.time);
+}
+
+/**
+ * De-duplicated gap reporting.
+ *
+ * Keyed on the gap's shape, not the time it was seen, so a stable historical
+ * hole is announced once and a NEW or worsening one still gets through.
+ */
+const gapSeen = new Map();          // symbol|interval -> fingerprint
+const GAP_RENOTIFY_MS = 6 * 60 * 60 * 1000;
+
+function reportGaps(symbol, interval, length, gaps) {
+  const key = `${symbol}|${interval}`;
+  const fingerprint = `${gaps.missing}:${gaps.worst}`;
+  const prev = gapSeen.get(key);
+  if (prev && prev.fingerprint === fingerprint && Date.now() - prev.at < GAP_RENOTIFY_MS) return;
+  gapSeen.set(key, { fingerprint, at: Date.now() });
+
+  const pct = (gaps.missing / length) * 100;
+  const msg = `${symbol} ${interval}: ${gaps.missing} missing bar(s) in ${length}`
+    + ` (${pct.toFixed(2)}%, worst gap ${gaps.worst}x)`;
+
+  // A single isolated bar is a blemish; a wide hole distorts every indicator.
+  if (gaps.worst >= 3 || pct >= 2) log.warn(`${msg} — indicators on this series are unreliable`);
+  else log.info(`${msg} — negligible, noted once`);
+}
+
+/** Forget what has been reported (used by tests and on a universe change). */
+export function resetGapReports() { gapSeen.clear(); }
+
 function countGaps(candles, interval) {
   const step = (TF_MINUTES[interval] || 0) * 60_000;
   if (!step || candles.length < 2) return { missing: 0, worst: 1 };

@@ -615,3 +615,24 @@ real, which is why the leverage and liquidation guards matter.
 `1day`, `1week`, `1month`). All are accepted by the endpoint — including
 `3min`, which the enum omits just as it omits `3m` — so they are normalised to
 the short form rather than rejected.
+
+## Kline pages drop bars, and it is repairable
+
+Measured across BTC/ETH/SOL/XRP/DOGE/LINK on 5m and 15m:
+
+- a 200-row page requested **without** `endTime` is always complete
+- the paged-back request (`endTime = oldest - 1`) came back **exactly one bar
+  short, every time, on every symbol**
+- re-asking for the same window with `limit=50` returns the missing bar in
+  most cases
+
+So the page seam is fine — the bar loss is inside the large `endTime` page
+itself, and it is an artefact of page size rather than absent history. This was
+not cosmetic: a missing bar shifts every EMA/ATR/ADX period after it, so the
+indicators were reading a slightly wrong series on every symbol.
+
+`getCandles` now backfills: after assembling, it re-fetches each hole with a
+50-row page and merges what comes back, capped at four repairs per call. On the
+sample above that removed 9 of 12 gaps. What survives is genuine missing
+history (an exchange outage, those bars never existed) and is reported once per
+gap shape rather than on every scan pass.
