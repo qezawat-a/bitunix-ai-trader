@@ -1,0 +1,24 @@
+{
+  "name": "bitunix-ai-trader",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Agentic AI Futures Trader for Bitunix (LIVE) with Telegram chat, Neon long-term memory, MCP tools and multi-strategy consensus scanner.",
+  "main": "src/index.js",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "scripts": {
+    "start": "node src/index.js",
+    "mcp": "node src/mcp/server.js",
+    "migrate": "node src/db/migrate.js",
+    "doctor": "node scripts/doctor.js",
+    "mcp:config": "node scripts/mcp-config.js",
+    "mcp:test": "node scripts/mcp-test.js"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "pg": "^8.13.1",
+    "ws": "^8.18.0"
+  }
+}
