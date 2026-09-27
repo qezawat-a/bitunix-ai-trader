@@ -5,7 +5,6 @@ import { createLogger } from '../logger.js';
 import { config } from '../config.js';
 import * as db from '../db/index.js';
 import { portfolioSnapshot } from '../trading/manager.js';
-import { availableBalance } from '../trading/executor.js';
 
 const log = createLogger('agent');
 
@@ -227,12 +226,6 @@ Then reply with ONLY a JSON object:
       const s = db.settings();
       const parts = [];
       if (!s.auto_trade) parts.push('auto_trade:off');
-      let bal = null;
-      try { bal = await availableBalance(); } catch { /* ignore */ }
-      if (bal) {
-        const floor = Number(s.min_account_balance_usdt ?? 5);
-        if (Number(bal.available) < floor) parts.push('balance:below-floor');
-      }
       let open = null;
       try { open = (await portfolioSnapshot())?.count; } catch { /* ignore */ }
       if (open === 0) parts.push('positions:none');

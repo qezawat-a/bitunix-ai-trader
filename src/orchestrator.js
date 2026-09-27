@@ -162,30 +162,6 @@ export class Orchestrator {
       return;
     }
 
-    // Below the floor there is not enough margin to open anything, so every
-    // signal would cost a full agent cycle and an order that the exchange
-    // rejects. Stop at the gate instead, and say it once — the balance is a
-    // standing condition, not news that needs repeating every scan.
-    const floor = Number(s.min_account_balance_usdt ?? 5);
-    if (floor > 0) {
-      let avail = null;
-      try { avail = (await availableBalance())?.available; } catch { /* keep going */ }
-      if (avail != null && Number(avail) < floor) {
-        if (this._balanceFloorNotified !== true) {
-          this._balanceFloorNotified = true;
-          await this.notify(
-            mdt`⏸ Entries paused — available balance ${Number(avail).toFixed(2)} USDT is below min_account_balance_usdt (${floor}).`
-            + '\n' + italic('Scanning and position management continue. This will not be repeated.'),
-          );
-        }
-        return;
-      }
-      if (avail != null && this._balanceFloorNotified) {
-        this._balanceFloorNotified = false;
-        await this.notify(mdt`▶️ Entries resumed — balance ${Number(avail).toFixed(2)} USDT is above the ${floor} USDT floor.`);
-      }
-    }
-
     // --- the agent is the final gate on every qualified signal
     let snap;
     try { snap = await portfolioSnapshot(); }
@@ -244,21 +220,27 @@ export class Orchestrator {
     ]);
     const unreadable = snapshot.unreadable || balance.unreadable;
     if (unreadable) {
-      // Announce once, not every report interval: an unreachable account is a
-      // standing condition too, and repeating it turns a real alarm into
-      // wallpaper. Re-announced only if the error itself changes.
-      if (this._unreadable !== unreadable) {
+      // Do NOT go permanently silent. The first version of this returned
+      // early after a single message, so a persistently unreadable account
+      // meant the bot never spoke again — which is indistinguishable from
+      // being dead, the exact failure this whole path exists to prevent.
+      // Announce on change, then keep a slow pulse so it stays visibly alive.
+      const every = Math.max(5, Number(db.settings().heartbeat_minutes ?? 15)) * 60_000;
+      const changed = this._unreadable !== unreadable;
+      if (changed || Date.now() - (this._unreadableAt || 0) > every) {
         this._unreadable = unreadable;
+        this._unreadableAt = Date.now();
         await this.notify([
-          mdt`⚠️ Cannot read the account — reporting paused rather than showing zeros.`,
+          mdt`⚠️ Cannot read the account — showing no numbers rather than false zeros.`,
           mdt`${unreadable}`,
-          italic('This will not be repeated until it changes or recovers.'),
+          italic(changed ? 'Retrying every cycle.' : 'Still failing.'),
         ].join('\n'));
       }
       return;
     }
     if (this._unreadable) {
       this._unreadable = null;
+      this._unreadableAt = 0;
       await this.notify(mdt`✅ Account readable again — reporting resumed.`);
     }
     // Stay quiet when there is genuinely nothing to say — but not SILENT.

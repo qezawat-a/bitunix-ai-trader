@@ -97,6 +97,7 @@ export class TelegramBot {
           { command: 'signal', description: 'Scan the market now' },
           { command: 'analyse', description: 'Deep analysis of a symbol' },
           { command: 'pnl', description: 'Performance summary' },
+          { command: 'diag', description: 'Why is it quiet? test every link' },
           { command: 'settings', description: 'All trade settings' },
           { command: 'set', description: 'Change a setting' },
           { command: 'close', description: 'Close a position' },

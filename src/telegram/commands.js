@@ -62,6 +62,68 @@ export function createCommandHandler(ctx) {
 
     async help(chatId) { await reply(chatId, HELP); },
 
+    /**
+     * Test every link in the notification chain and report which one is broken.
+     *
+     * Exists because "nothing is happening" is not a diagnosis: reports can go
+     * missing because no chat is configured to push to, because the exchange
+     * read fails, because a loop is erroring, or because Telegram rejected the
+     * message. Each of those looks identical from the outside.
+     */
+    async diag(chatId) {
+      await bot.sendTyping(chatId);
+      const L = [bold('🩺 Diagnostics'), ''];
+      const ok = (b) => (b ? '✅' : '❌');
+
+      // 1. can the bot push unprompted messages at all?
+      const ids = orchestrator?.chatIds || [];
+      L.push(bold('Push target'));
+      L.push(mdt`${ok(ids.length)} TELEGRAM_ALLOWED_CHAT_IDS: ${ids.length} configured`);
+      if (!ids.length) {
+        L.push(italic('Empty: the bot answers commands but can never push a report, signal or alarm.'));
+      } else if (!ids.map(String).includes(String(chatId))) {
+        L.push(italic('This chat is NOT in the list — reports are being pushed somewhere else.'));
+      }
+
+      // 2. exchange reads
+      L.push('', bold('Exchange'));
+      for (const [label, fn] of [
+        ['balance', () => availableBalance()],
+        ['positions', () => portfolioSnapshot()],
+        ['history', () => exchangePerformance(1)],
+      ]) {
+        try {
+          const r = await fn();
+          const detail = label === 'balance' ? `${Number(r.available).toFixed(2)} USDT`
+            : label === 'positions' ? `${r.count} open`
+              : `${r.trades} closed in 24h`;
+          L.push(mdt`✅ ${label}: ${detail}`);
+        } catch (e) {
+          L.push(mdt`❌ ${label}: ${e.message}`);
+        }
+      }
+
+      // 3. loops
+      L.push('', bold('Loops'));
+      const f = orchestrator?.failures || {};
+      for (const name of ['scan', 'manage', 'guard', 'report', 'autonomous']) {
+        const st = f[name];
+        if (!st) { L.push(mdt`· ${name}: not started`); continue; }
+        L.push(st.count
+          ? mdt`❌ ${name}: failing ${st.count}x — ${st.lastError || 'unknown'}`
+          : mdt`✅ ${name}: healthy`);
+      }
+      const st = orchestrator?.stats || {};
+      L.push('', mdt`scans ${st.scans ?? 0} · signals ${st.signals ?? 0} · trades ${st.trades ?? 0} · errors ${st.errors ?? 0}`);
+
+      // 4. why the report loop may be quiet
+      L.push('', bold('Report loop'));
+      if (orchestrator?._unreadable) L.push(mdt`⚠️ paused: ${orchestrator._unreadable}`);
+      else L.push(italic('Reports send when there are positions or signals; otherwise a heartbeat every heartbeat_minutes.'));
+
+      await reply(chatId, L.join('\n'));
+    },
+
     async status(chatId) {
       const [bal, snap, cd, stats] = await Promise.all([
         availableBalance().catch((e) => ({ error: e.message })),

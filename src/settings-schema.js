@@ -6,10 +6,11 @@
  * Before this existed, /set validated and the agent's tool did not, which meant
  * the LLM could set `timeframes: "3min"` and kill the scanner on the next tick.
  */
+import { config } from './config.js';
 import { SUPPORTED_TIMEFRAMES, timeframeMinutes, normaliseTimeframe } from './scanner/scanner.js';
 
 export const NUMERIC = new Set([
-  'trailing_callback', 'account_tp_usdt', 'account_sl_usdt', 'min_account_balance_usdt', 'heartbeat_minutes',
+  'trailing_callback', 'account_tp_usdt', 'account_sl_usdt', 'heartbeat_minutes',
   'leverage', 'margin_pct', 'universe_size', 'min_24h_volume_usd',
   'scan_interval_sec', 'manage_interval_sec', 'guard_interval_sec',
   'report_interval_sec', 'agent_autonomous_sec', 'min_agreement',
@@ -27,7 +28,6 @@ const RANGES = {
   trailing_callback: [0.05, 50],
   account_tp_usdt: [0, 1e9],
   account_sl_usdt: [0, 1e9],
-  min_account_balance_usdt: [0, 1e9],
   heartbeat_minutes: [5, 1440],
   leverage: [1, 125],
   margin_pct: [0.1, 100],
@@ -96,6 +96,12 @@ export function parseLadder(spec) {
   return steps;
 }
 
+/**
+ * Every setting that actually exists, taken from the config defaults so the
+ * two can never drift apart.
+ */
+const KNOWN = new Set(Object.keys(config.defaults));
+
 export function validateSetting(key, raw) {
   if (NUMERIC.has(key)) {
     const n = typeof raw === 'number' ? raw : Number(String(raw).trim());
@@ -138,6 +144,13 @@ export function validateSetting(key, raw) {
     const u = v.toUpperCase().replace(/\s+/g, '');
     if (!u) throw new Error('symbols must be AUTO or a comma-separated list');
     return u;
+  }
+
+  // A key nobody recognises is almost always a typo or a setting that used to
+  // exist. Accepting it silently writes a value that nothing will ever read,
+  // and the user walks away believing they changed something. Reject it.
+  if (!KNOWN.has(key)) {
+    throw new Error(`unknown setting "${key}". Use /settings to see what exists.`);
   }
 
   if (ENUMS[key]) {

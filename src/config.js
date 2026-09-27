@@ -92,7 +92,6 @@ export const config = {
     trailing_callback: num(process.env.TRAILING_CALLBACK, 1.5),                // % if RATIO, price if INTERVAL
     account_tp_usdt: num(process.env.ACCOUNT_TP_USDT, 0),                      // 0 = off
     account_sl_usdt: num(process.env.ACCOUNT_SL_USDT, 0),                      // 0 = off
-    min_account_balance_usdt: num(process.env.MIN_ACCOUNT_BALANCE_USDT, 5),    // below this, skip entries
     heartbeat_minutes: num(process.env.HEARTBEAT_MINUTES, 15),                 // idle 'still alive' ping
 
     max_open_positions: num(process.env.MAX_OPEN_POSITIONS, 5),
