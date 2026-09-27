@@ -62,6 +62,7 @@ export const config = {
     order_unit: str(process.env.ORDER_UNIT, 'COST').toUpperCase(),             // NOMINAL (position value) | COST (margin you commit) | QTY (base coin)
     margin_pct: num(process.env.MARGIN_PCT, 5),                                // % of available balance used as margin
     symbols: str(process.env.SYMBOLS, 'AUTO'),                                 // AUTO = full pair list from exchange
+    universe_rank: str(process.env.UNIVERSE_RANK, 'VOLUME').toUpperCase(),       // VOLUME | GAINERS | LOSERS | MOVERS
     universe_size: num(process.env.UNIVERSE_SIZE, 40),
     min_24h_volume_usd: num(process.env.MIN_24H_VOLUME_USD, 20_000_000),
     timeframes: str(process.env.TIMEFRAMES, '5m,15m,1h'),

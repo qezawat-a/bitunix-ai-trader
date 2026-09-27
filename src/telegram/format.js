@@ -202,6 +202,7 @@ export const SETTING_INFO = {
   account_tp_usdt:          ['Close EVERY position once total unrealised profit reaches this many USDT. 0 disables it.', 'USDT, 0 = off'],
   account_sl_usdt:          ['Close EVERY position once total unrealised loss reaches this many USDT (enter it positive). 0 disables it.', 'USDT, 0 = off'],
   heartbeat_minutes:        ['When there are no positions and no signals, how often to send a one-line "still alive" ping instead of staying completely silent.', 'minutes, e.g. 15'],
+  universe_rank:            ['How the pairs that clear the liquidity floor are ordered. VOLUME = deepest books first. GAINERS = biggest 24h rise first. LOSERS = biggest 24h fall. MOVERS = biggest move either way.', 'VOLUME | GAINERS | LOSERS | MOVERS'],
   min_24h_volume_usd:       ['Liquidity floor. Pairs thinner than this are never scanned — a stop can be swept on an illiquid book.', 'USD, e.g. 20000000'],
   timeframes:               ['Timeframes analysed. The shortest is the execution timeframe; the others confirm.', '1m 3m 5m 15m 30m 1h 2h 4h 6h 8h 12h 1d 3d 1w 1M'],
 
@@ -235,7 +236,7 @@ export const SETTING_INFO = {
 };
 
 const SETTING_GROUPS = {
-  'Trading':     ['auto_trade', 'leverage', 'margin_mode', 'position_mode', 'order_unit', 'margin_pct', 'max_open_positions', 'symbols', 'universe_size', 'min_24h_volume_usd', 'timeframes'],
+  'Trading':     ['auto_trade', 'leverage', 'margin_mode', 'position_mode', 'order_unit', 'margin_pct', 'max_open_positions', 'symbols', 'universe_rank', 'universe_size', 'min_24h_volume_usd', 'timeframes'],
   'TP / SL':     ['tpsl_method', 'partial_tp_ladder', 'trailing_method', 'trailing_callback', 'trailing_distance_atr', 'trailing_trigger_roi_pct', 'breakeven_threshold', 'account_tp_usdt', 'account_sl_usdt'],
   'Signal gates': ['min_agreement', 'min_confidence', 'tf_min_confidence', 'signal_confirm_scans', 'cooldown_min'],
   'Reversal':    ['reversal_enabled', 'reversal_confidence'],

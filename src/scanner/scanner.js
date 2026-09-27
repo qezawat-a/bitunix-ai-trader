@@ -245,7 +245,11 @@ export async function buildUniverse() {
       const high = Number(t.high || 0), low = Number(t.low || 0);
       const range = low > 0 ? (high - low) / low : 0;
       const qv = Number(t.quoteVol || 0);
-      return { symbol: t.symbol, qv, range, price: lastP };
+      // 24h change from the ticker's own open, the same basis the exchange
+      // shows on its market page
+      const open = Number(t.open || 0);
+      const chg = open > 0 ? ((lastP - open) / open) * 100 : 0;
+      return { symbol: t.symbol, qv, range, price: lastP, chg };
     })
     .filter((x) => x.qv > 0 && x.price > 0);
 
@@ -265,17 +269,45 @@ export async function buildUniverse() {
   // 2000x volume difference into 1.5x of score and then let a 70% daily range
   // erase it — BTC ($2.4B) ranked 64th, behind coins doing $600k. That is how
   // you end up long a microcap with 10x leverage.
+  // How to rank what survives the liquidity floor.
+  //
+  //   VOLUME   the deepest books first, movement only as a tie-breaker
+  //   GAINERS  biggest 24h gain first — momentum, and long-biased by nature
+  //   LOSERS   biggest 24h fall first — the short side of the same idea
+  //   MOVERS   biggest move in either direction
+  //
+  // min_24h_volume_usd still applies in every mode, and it matters MORE in the
+  // change-ranked modes: the biggest movers on an exchange are usually the
+  // thinnest books, which is exactly where a stop gets swept. The floor is the
+  // only thing keeping those out.
+  const mode = String(s.universe_rank || 'VOLUME').toUpperCase();
   const maxVol = Math.max(...pool.map((x) => x.qv));
-  const scored = pool
-    .map((x) => {
-      const liquidity = x.qv / maxVol;                    // 0..1, linear
-      const movement = Math.min(x.range, 0.25) / 0.25;    // 0..1, capped at 25%
-      return { ...x, score: liquidity * 0.75 + movement * 0.25 };
-    })
-    .sort((a, b) => b.score - a.score);
+
+  let scored;
+  if (mode === 'GAINERS') {
+    scored = [...pool].sort((a, b) => b.chg - a.chg);
+  } else if (mode === 'LOSERS') {
+    scored = [...pool].sort((a, b) => a.chg - b.chg);
+  } else if (mode === 'MOVERS') {
+    scored = [...pool].sort((a, b) => Math.abs(b.chg) - Math.abs(a.chg));
+  } else {
+    scored = pool
+      .map((x) => {
+        const liquidity = x.qv / maxVol;                  // 0..1, linear
+        const movement = Math.min(x.range, 0.25) / 0.25;  // 0..1, capped at 25%
+        return { ...x, score: liquidity * 0.75 + movement * 0.25 };
+      })
+      .sort((a, b) => b.score - a.score);
+  }
 
   const size = Number(s.universe_size || 40);
-  return scored.slice(0, size).map((x) => x.symbol);
+  const picked = scored.slice(0, size);
+  if (picked.length) {
+    const head = picked.slice(0, 5)
+      .map((x) => `${x.symbol} ${x.chg >= 0 ? '+' : ''}${x.chg.toFixed(1)}%`).join(', ');
+    log.info(`universe by ${mode}: ${picked.length} pairs — ${head}`);
+  }
+  return picked.map((x) => x.symbol);
 }
 
 /** Analyse one symbol across all configured timeframes. */
