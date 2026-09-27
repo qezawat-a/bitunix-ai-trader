@@ -457,6 +457,7 @@ export async function consensus(analysis) {
     price: analysis.price,
     atr: analysis.atr,
     atrPct: analysis.atr && analysis.price ? (analysis.atr / analysis.price) * 100 : null,
+    // percent per funding interval, as Bitunix reports it (0.01 = 0.01%)
     funding: analysis.funding?.fundingRate != null ? Number(analysis.funding.fundingRate) : null,
     timeframes: Object.fromEntries(
       tfKeys.map((tf) => [tf, {

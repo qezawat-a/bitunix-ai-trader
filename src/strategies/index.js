@@ -211,15 +211,25 @@ export function orderflowFunding(c, ctx = {}) {
   const bidVol = depth.bids.slice(0, topN).reduce((s, [, q]) => s + Number(q), 0);
   const askVol = depth.asks.slice(0, topN).reduce((s, [, q]) => s + Number(q), 0);
   const imb = (bidVol - askVol) / (bidVol + askVol || 1);      // -1 .. +1
-  const fr = Number(funding?.fundingRate ?? 0);                 // e.g. 0.0005
+  // Bitunix reports fundingRate ALREADY IN PERCENT, not as a decimal fraction.
+  // The proof is in the same payload: maxFundingRate is 0.3 / 0.4875 / 2, which
+  // as fractions would be 30% / 49% / 200% per 8h. So 0.01 means 0.01%.
+  //
+  // This was read as a fraction and compared against 0.0006. Measured across
+  // all 895 pairs, that flagged 81% of them as permanently "crowded", which
+  // both suppressed the ordinary LONG branch (it requires !crowdedLong) and
+  // fired the fade branches constantly. Normal funding is around 0.01%; the
+  // thresholds below sit at 3x that, which selects ~5% of pairs.
+  const frPct = Number(funding?.fundingRate ?? 0);              // percent, e.g. 0.01 = 0.01%
   const sl = I.slope(closes, 20);
-  const notes = [`imbalance=${(imb * 100).toFixed(1)}%`, `funding=${(fr * 100).toFixed(4)}%`, `slope=${sl.toFixed(3)}`];
+  const notes = [`imbalance=${(imb * 100).toFixed(1)}%`, `funding=${frPct.toFixed(4)}%`, `slope=${sl.toFixed(3)}`];
 
   let side = null, conf = 0;
   // Crowded longs (very positive funding) + selling book pressure -> fade to SHORT.
   // Crowded shorts (very negative funding) + buying book pressure -> fade to LONG.
-  const crowdedLong = fr > 0.0006;
-  const crowdedShort = fr < -0.0006;
+  const CROWDED_PCT = 0.03;                                     // 3x a normal 0.01% rate
+  const crowdedLong = frPct > CROWDED_PCT;
+  const crowdedShort = frPct < -CROWDED_PCT;
 
   if (imb > 0.22 && !crowdedLong && sl >= 0) {
     side = 'LONG';

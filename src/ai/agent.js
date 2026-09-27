@@ -188,7 +188,7 @@ SIGNAL
   regime      ${signal.regime}   (higher TF: ${signal.htfRegime})
   price       ${signal.price}
   ATR%        ${signal.atrPct?.toFixed(3)}
-  funding     ${signal.funding}
+  funding     ${signal.funding}% per 8h (normal is about 0.01%)
   strategies  ${signal.strategies.map((x) => `${x.name}@${x.confidence} [${x.timeframes.join(',')}]`).join(' | ')}
   opposing    ${signal.opposite.agreement} strategies vote ${signal.opposite.side} at ${signal.opposite.confidence}
   flags       ${signal.flags.join('; ') || 'none'}

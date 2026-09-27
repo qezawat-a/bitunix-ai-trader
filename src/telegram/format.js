@@ -126,7 +126,7 @@ export function formatSignal(s) {
   const lines = [
     `${emoji} ${bold(`${s.symbol} ${s.side}`)}`,
     mdt`confidence ${s.confidence}%  ·  agreement ${s.agreement}/6  ·  regime ${s.regime} (HTF ${s.htfRegime || '—'})`,
-    mdt`price ${fmtNum(s.price, 6)}  ·  ATR ${Number(s.atrPct || 0).toFixed(3)}%${s.funding != null ? `  ·  funding ${(s.funding * 100).toFixed(4)}%` : ''}`,
+    mdt`price ${fmtNum(s.price, 6)}  ·  ATR ${Number(s.atrPct || 0).toFixed(3)}%${s.funding != null ? `  ·  funding ${Number(s.funding).toFixed(4)}%` : ''}`,
     '',
     bold('Strategies'),
     ...s.strategies.map((x) => mdt`  • ${x.name} — ${x.confidence}% on ${x.timeframes.join(', ')}`),
