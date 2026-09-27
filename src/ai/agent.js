@@ -205,15 +205,57 @@ Then reply with ONLY a JSON object:
       persist: false, thinking: s.thinking_level,
     });
 
-    const m = r.text.match(/\{[\s\S]*\}/);
-    if (!m) return { take: false, reasoning: `could not parse verdict: ${r.text.slice(0, 200)}`, raw: r.text };
-    try {
-      const v = JSON.parse(m[0]);
-      return { take: Boolean(v.take), confidence: v.confidence, marginUsdt: v.margin_usdt ?? null, reasoning: v.reasoning || '', raw: r.text };
-    } catch (e) {
-      return { take: false, reasoning: `bad JSON: ${e.message}`, raw: r.text };
+    const parse = (text) => {
+      const m = String(text || '').match(/\{[\s\S]*\}/);
+      if (!m) return null;
+      try {
+        const v = JSON.parse(m[0]);
+        return {
+          take: Boolean(v.take), confidence: v.confidence,
+          marginUsdt: v.margin_usdt ?? null, reasoning: v.reasoning || '', raw: text,
+        };
+      } catch { return null; }
+    };
+
+    let verdict = parse(r.text);
+
+    // A model that ends its turn on tool calls returns no text at all, and the
+    // first version of this treated that as a decision not to trade. It is not
+    // a decision — it is a missing answer, and reporting it as "skipping" made
+    // a broken gate look like a cautious one. Ask once more, plainly, with the
+    // reasoning already done and nothing left to do but answer.
+    if (!verdict) {
+      this._verdictRetries = (this._verdictRetries || 0) + 1;
+      log.warn(`${signal.symbol}: no verdict JSON, retrying once (empty answer: ${!r.text?.trim()})`);
+      const again = await this.run({
+        chatId,
+        userMessage: `${prompt}\n\nDo not call any tools. Reply with the JSON object and nothing else.`,
+        subject: signal.symbol, persist: false, thinking: 'low',
+      });
+      verdict = parse(again.text);
+      if (verdict) verdict.recovered = true;
     }
+
+    if (!verdict) {
+      // Still nothing. Decline the trade — never act on a verdict we do not
+      // have — but mark it as a FAILURE so the caller can say so instead of
+      // inventing a rationale the model never gave.
+      this._verdictFailures = (this._verdictFailures || 0) + 1;
+      return {
+        take: false,
+        error: true,
+        failures: this._verdictFailures,
+        reasoning: 'the model returned no usable verdict — this is a gate failure, not a judgement',
+        raw: r.text,
+      };
+    }
+
+    this._verdictFailures = 0;
+    return verdict;
   }
+
+  /** How many consecutive judgeSignal calls produced no usable answer. */
+  verdictFailureStreak() { return this._verdictFailures || 0; }
 
   /**
    * A fingerprint of the conditions that are permanently true right now.

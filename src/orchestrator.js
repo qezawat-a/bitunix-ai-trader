@@ -134,7 +134,9 @@ export class Orchestrator {
         ].join('\n'));
         const verdict = await agent.judgeSignal(signal);
         if (!verdict.take) {
-          await this.notify(mdt`↩️ reversal skipped — ${verdict.reasoning}`);
+          await this.notify(verdict.error
+            ? mdt`⚠️ ${signal.symbol} reversal: no verdict from the model — left the position alone.`
+            : mdt`↩️ reversal skipped — ${verdict.reasoning}`);
           continue;
         }
         const r = await reverse(position, signal, verdict);
@@ -180,7 +182,23 @@ export class Orchestrator {
       }, sig.symbol);
 
       if (!verdict.take) {
-        await this.notify(mdt`🤔 skipping ${sig.symbol} — ${verdict.reasoning}`);
+        if (verdict.error) {
+          // Not a judgement: the gate could not produce one. Say that, and
+          // escalate if it keeps happening — a silently failing gate means the
+          // bot stops trading entirely while looking merely cautious.
+          await this.notify([
+            mdt`⚠️ ${sig.symbol}: no verdict from the model — signal dropped, NOT rejected.`,
+            italic(verdict.failures > 1 ? `${verdict.failures} in a row — the AI gate is effectively down.` : 'Retried once already.'),
+          ].join('\n'));
+          if (verdict.failures === 3) {
+            await this.notify([
+              mdt`🚨 The AI gate has failed ${verdict.failures} times in a row.`,
+              mdt`No signal can be taken while this persists. Check /models and /diag.`,
+            ].join('\n'));
+          }
+        } else {
+          await this.notify(mdt`🤔 skipping ${sig.symbol} — ${verdict.reasoning}`);
+        }
         continue;
       }
 
