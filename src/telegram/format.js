@@ -201,6 +201,8 @@ export const SETTING_INFO = {
   trailing_callback:        ['The retrace that closes the position, once trailing is armed. A percentage of the best price when trailing_method is RATIO, an absolute price distance when INTERVAL. Ignored for ATR.', 'e.g. 1.5'],
   account_tp_usdt:          ['Close EVERY position once total unrealised profit reaches this many USDT. 0 disables it.', 'USDT, 0 = off'],
   account_sl_usdt:          ['Close EVERY position once total unrealised loss reaches this many USDT (enter it positive). 0 disables it.', 'USDT, 0 = off'],
+  heartbeat_minutes:        ['When there are no positions and no signals, how often to send a one-line "still alive" ping instead of staying completely silent.', 'minutes, e.g. 15'],
+  min_account_balance_usdt: ['Below this available balance the scanner stops attempting entries, instead of failing one order per signal.', 'USDT, e.g. 5'],
   min_24h_volume_usd:       ['Liquidity floor. Pairs thinner than this are never scanned — a stop can be swept on an illiquid book.', 'USD, e.g. 20000000'],
   timeframes:               ['Timeframes analysed. The shortest is the execution timeframe; the others confirm.', '1m 3m 5m 15m 30m 1h 2h 4h 6h 8h 12h 1d 3d 1w 1M'],
 

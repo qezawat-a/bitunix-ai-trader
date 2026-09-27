@@ -5,6 +5,7 @@ import { createLogger } from '../logger.js';
 import { config } from '../config.js';
 import * as db from '../db/index.js';
 import { portfolioSnapshot } from '../trading/manager.js';
+import { availableBalance } from '../trading/executor.js';
 
 const log = createLogger('agent');
 
@@ -215,6 +216,32 @@ Then reply with ONLY a JSON object:
     }
   }
 
+  /**
+   * A fingerprint of the conditions that are permanently true right now.
+   *
+   * Only cheap, already-cached facts go in here — this runs on every tick and
+   * must never be the reason a tick is slow or fails.
+   */
+  async _standingKey() {
+    try {
+      const s = db.settings();
+      const parts = [];
+      if (!s.auto_trade) parts.push('auto_trade:off');
+      let bal = null;
+      try { bal = await availableBalance(); } catch { /* ignore */ }
+      if (bal) {
+        const floor = Number(s.min_account_balance_usdt ?? 5);
+        if (Number(bal.available) < floor) parts.push('balance:below-floor');
+      }
+      let open = null;
+      try { open = (await portfolioSnapshot())?.count; } catch { /* ignore */ }
+      if (open === 0) parts.push('positions:none');
+      return parts.length ? parts.join('|') : null;
+    } catch {
+      return null;
+    }
+  }
+
   /** Free-running heartbeat thought — lets the agent act on its own initiative. */
   /**
    * A background cycle. This runs every few seconds forever, so the bar for
@@ -228,7 +255,20 @@ Then reply with ONLY a JSON object:
   async autonomousTick({ chatId = 'autonomous', notify = null }) {
     const s = db.settings();
 
-    const prompt = `Autonomous background check. You are talking to NOBODY — this is a timer, not a question from the user.
+    // When trading is disabled the model reliably decides that this is news
+    // and announces it every single tick, in whatever language the user
+    // speaks. It is not news: the user set the flag and can see it in
+    // /settings. Say so explicitly rather than trying to pattern-match the
+    // apology afterwards.
+    const gate = s.auto_trade
+      ? ''
+      : `\n\nauto_trade is OFF. The user set it deliberately and can see it in `
+        + `/settings — they already know, and the scanner already labels every `
+        + `signal with it. Do NOT announce it, do NOT explain that you cannot `
+        + `place orders, do NOT offer to trade if it were enabled. If the only `
+        + `thing you have to say is that you are unable to act, reply NOOP.`;
+
+    const prompt = `Autonomous background check. You are talking to NOBODY — this is a timer, not a question from the user.${gate}
 
 Check with tools, do not assume:
 1. Open positions — in trouble, missing protection, or is the stop due to move?
@@ -258,6 +298,27 @@ narrate that you are checking. Silence is the correct and normal outcome.`;
     const tookAction = (r.trace || []).some((t) => TOOL_MAP[t.tool]?.danger);
     const CHATTER = /^(all (is |looks )?(good|fine|well)|nothing (to do|needs|to report)|no action|monitoring|standing by|everything (is )?(fine|ok|normal|stable)|position[s]? (are|look) (fine|healthy|ok))/i;
     if (!tookAction && CHATTER.test(text)) return { acted: false, suppressed: 'chatter' };
+
+    // Standing conditions are STATES, not events: auto_trade being off, the
+    // balance being too small to trade, having no open positions. They are
+    // true on every tick, so a model that mentions them will mention them
+    // forever — once every 15 seconds, in whatever language the user speaks.
+    //
+    // Chasing that with one regex per phrasing does not scale (the first
+    // attempt only caught English). Instead, key on the CONDITIONS rather than
+    // the words: if nothing was done and the standing state has not changed
+    // since it was last reported, the message is a restatement. A change in
+    // the state lets exactly one message through.
+    if (!tookAction) {
+      const key = await this._standingKey();
+      if (key && key === this._standingAnnounced?.key) {
+        return { acted: false, suppressed: `restating standing condition (${key})` };
+      }
+      if (key) this._standingAnnounced = { key, at: Date.now() };
+      // Conditions cleared: forget what was announced, so if the same state
+      // returns later it is reported once more rather than silently swallowed.
+      else this._standingAnnounced = null;
+    }
 
     // Do not say the same thing twice in a row.
     const fingerprint = text.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim().slice(0, 160);

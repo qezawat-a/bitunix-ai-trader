@@ -259,3 +259,68 @@ export async function portfolioSnapshot() {
     positions,
   };
 }
+
+/**
+ * Realised performance, read from the EXCHANGE rather than our own table.
+ *
+ * The `trades` table is only written by openFromSignal, so it contains bot
+ * entries and nothing else. Anything opened by hand, opened before this bot
+ * ran, or opened while auto_trade was off is invisible to it — which is why
+ * /pnl read 0 trades and +0.00 PnL on an account that had actually traded.
+ *
+ * get_history_positions is the account's own record and covers all of it.
+ * Fields (PositionHistoryResp): realizedPNL, fee, funding, ctime, mtime.
+ *
+ * Fee and funding are reported separately rather than folded into the total:
+ * their sign convention is not documented, and quietly adding them with the
+ * wrong sign would misstate performance in exactly the direction that flatters
+ * it. realizedPNL is the headline; the other two are shown next to it.
+ */
+export async function exchangePerformance(days = 7, { symbol = null } = {}) {
+  const endTime = Date.now();
+  const startTime = endTime - days * 86_400_000;
+
+  const rows = [];
+  const PAGE = 100;
+  for (let skip = 0; skip < 1000; skip += PAGE) {
+    let page;
+    try {
+      page = await bitunix.getHistoryPositions({ symbol, startTime, endTime, skip, limit: PAGE });
+    } catch (e) {
+      if (!rows.length) throw e;      // nothing at all: let the caller report it
+      break;                          // partial data is still worth showing
+    }
+    const list = Array.isArray(page) ? page : (page?.positionList || []);
+    if (!list.length) break;
+    rows.push(...list);
+    if (list.length < PAGE) break;
+  }
+
+  // the window filter is applied server-side, but closed-at can be null on a
+  // partially closed position, so keep only rows that really closed in range
+  const closed = rows.filter((r) => {
+    const t = Number(r.mtime || r.ctime || 0);
+    return t >= startTime && t <= endTime;
+  });
+
+  let pnl = 0; let fees = 0; let funding = 0; let wins = 0; let losses = 0;
+  for (const r of closed) {
+    const p = Number(r.realizedPNL || 0);
+    pnl += p;
+    fees += Number(r.fee || 0);
+    funding += Number(r.funding || 0);
+    if (p > 0) wins++; else if (p < 0) losses++;
+  }
+
+  return {
+    source: 'exchange',
+    days,
+    trades: closed.length,
+    wins,
+    losses,
+    pnl,
+    fees,
+    funding,
+    net: pnl + fees + funding,
+  };
+}

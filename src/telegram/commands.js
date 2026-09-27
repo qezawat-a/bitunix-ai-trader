@@ -11,7 +11,7 @@ import * as db from '../db/index.js';
 import { scan, analyseSymbol, consensus } from '../scanner/scanner.js';
 import { validateSetting } from '../settings-schema.js';
 import { availableBalance, closePosition, closeAll, resetSymbolConfigCache } from '../trading/executor.js';
-import { portfolioSnapshot, livePositions } from '../trading/manager.js';
+import { portfolioSnapshot, livePositions, exchangePerformance } from '../trading/manager.js';
 import {
   HELP, md, mdt, bold, italic, fmtNum, usd, pct, agentText,
   formatSignal, formatPositions, formatBalance, formatSettings,
@@ -65,7 +65,7 @@ export function createCommandHandler(ctx) {
     async status(chatId) {
       const [bal, snap, cd, stats] = await Promise.all([
         availableBalance().catch((e) => ({ error: e.message })),
-        portfolioSnapshot().catch(() => ({ count: 0, totalPnl: 0, totalMargin: 0 })),
+        portfolioSnapshot().catch((e) => ({ error: e.message, count: 0, totalPnl: 0, totalMargin: 0 })),
         db.activeCooldowns().catch(() => []),
         db.tradeStats(7).catch(() => null),
       ]);
@@ -164,7 +164,20 @@ export function createCommandHandler(ctx) {
     },
 
     async positions(chatId) {
-      await reply(chatId, formatPositions(await portfolioSnapshot()));
+      // An exchange error used to fall through as an empty snapshot, so
+      // "no open positions" and "I could not read the account" printed the
+      // same thing. They mean opposite things; say which one happened.
+      let snap;
+      try {
+        snap = await portfolioSnapshot();
+      } catch (e) {
+        return reply(chatId, [
+          bold('⚠️ Cannot read positions'), '',
+          mdt`${e.message}`,
+          italic('This is NOT the same as having no positions — the account could not be reached.'),
+        ].join('\n'));
+      }
+      await reply(chatId, formatPositions(snap));
     },
 
     async position_history(chatId, args) {
@@ -201,13 +214,48 @@ export function createCommandHandler(ctx) {
     },
 
     async pnl(chatId) {
-      const [d1, d7, d30] = await Promise.all([db.tradeStats(1), db.tradeStats(7), db.tradeStats(30)]);
+      await bot.sendTyping(chatId);
+      // The account's own history is the source of truth: the local trades
+      // table only ever contains positions THIS bot opened, so anything traded
+      // by hand or while auto_trade was off would read as zero.
+      let ex = null;
+      try {
+        ex = await Promise.all([
+          exchangePerformance(1), exchangePerformance(7), exchangePerformance(30),
+        ]);
+      } catch (e) {
+        ex = null;
+        log.warn(`exchange performance unavailable: ${e.message}`);
+      }
+      const [b1, b7, b30] = await Promise.all([db.tradeStats(1), db.tradeStats(7), db.tradeStats(30)]);
       const { rows } = await db.strategyWeights();
-      const snap = await portfolioSnapshot();
+      let snap;
+      try { snap = await portfolioSnapshot(); }
+      catch (e) { snap = { error: e.message, count: 0, totalPnl: 0 }; }
+
       const line = (label, s) => mdt`${label}: ${s.trades} trades  ${s.wins}W/${s.losses}L  PnL ${usd(s.pnl, 2)}${s.trades > 0 ? `  (${((s.wins / s.trades) * 100).toFixed(0)}% win)` : ''}`;
-      const lines = [bold('📈 Performance'), '',
-        line('24h', d1), line('7d', d7), line('30d', d30), '',
-        mdt`open: ${snap.count} positions, uPnL ${usd(snap.totalPnl)}`];
+
+      const lines = [bold('📈 Performance'), ''];
+      if (ex) {
+        lines.push(italic('account — every closed position, however it was opened'));
+        lines.push(line('24h', ex[0]), line('7d', ex[1]), line('30d', ex[2]));
+        const f = ex[2];
+        if (f.fees || f.funding) {
+          lines.push(mdt`30d fees ${usd(f.fees, 4)} · funding ${usd(f.funding, 4)} · net ${usd(f.net, 2)}`);
+        }
+      } else {
+        lines.push(italic('account history unavailable — showing bot-tracked trades only'));
+      }
+
+      const botTraded = b30.trades > 0;
+      if (botTraded || !ex) {
+        lines.push('', italic('opened by this bot'));
+        lines.push(line('24h', b1), line('7d', b7), line('30d', b30));
+      }
+
+      lines.push('', snap.error
+        ? mdt`open: could not read positions — ${snap.error}`
+        : mdt`open: ${snap.count} positions, uPnL ${usd(snap.totalPnl)}`);
       if (rows.length) {
         lines.push('', bold('Strategy weights'));
         for (const r of rows.sort((a, b) => b.weight - a.weight)) {

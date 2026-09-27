@@ -9,7 +9,7 @@
 import { SUPPORTED_TIMEFRAMES, timeframeMinutes, normaliseTimeframe } from './scanner/scanner.js';
 
 export const NUMERIC = new Set([
-  'trailing_callback', 'account_tp_usdt', 'account_sl_usdt',
+  'trailing_callback', 'account_tp_usdt', 'account_sl_usdt', 'min_account_balance_usdt', 'heartbeat_minutes',
   'leverage', 'margin_pct', 'universe_size', 'min_24h_volume_usd',
   'scan_interval_sec', 'manage_interval_sec', 'guard_interval_sec',
   'report_interval_sec', 'agent_autonomous_sec', 'min_agreement',
@@ -27,6 +27,8 @@ const RANGES = {
   trailing_callback: [0.05, 50],
   account_tp_usdt: [0, 1e9],
   account_sl_usdt: [0, 1e9],
+  min_account_balance_usdt: [0, 1e9],
+  heartbeat_minutes: [5, 1440],
   leverage: [1, 125],
   margin_pct: [0.1, 100],
   universe_size: [1, 200],

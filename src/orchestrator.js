@@ -117,7 +117,13 @@ export class Orchestrator {
     this.stats.signals += qualified.length;
 
     // --- reversals first: an opposite high-conviction signal on an open position
-    if (s.reversal_enabled) {
+    //
+    // A reversal CLOSES a position and OPENS the opposite one, so it is an
+    // entry, not a protective exit. It must obey auto_trade like any other
+    // entry. This used to run before the auto_trade gate below, which meant
+    // the bot flipped live positions while telling the user it was only
+    // analysing — the contradiction was real, and it was this.
+    if (s.reversal_enabled && s.auto_trade) {
       let reversals = [];
       try { reversals = await checkReversal(qualified); }
       catch (e) { log.warn(`reversal check unavailable: ${e.message}`); }
@@ -138,10 +144,46 @@ export class Orchestrator {
     }
 
     if (!s.auto_trade) {
+      if (s.reversal_enabled) {
+        let pending = [];
+        try { pending = await checkReversal(qualified); }
+        catch { /* reporting only; never let this break the scan */ }
+        for (const { position, signal } of pending) {
+          await this.notify([
+            mdt`🔄 REVERSAL SIGNAL — ${signal.symbol}`,
+            mdt`${position.side} → ${signal.side} at ${signal.confidence}% (${signal.agreement}/6)`,
+            italic('auto trade is OFF — the position was NOT flipped'),
+          ].join('\n'));
+        }
+      }
       for (const sig of qualified.slice(0, 3)) {
         await this.notify(formatSignal(sig) + '\n' + italic('auto trade is OFF — not executing'));
       }
       return;
+    }
+
+    // Below the floor there is not enough margin to open anything, so every
+    // signal would cost a full agent cycle and an order that the exchange
+    // rejects. Stop at the gate instead, and say it once — the balance is a
+    // standing condition, not news that needs repeating every scan.
+    const floor = Number(s.min_account_balance_usdt ?? 5);
+    if (floor > 0) {
+      let avail = null;
+      try { avail = (await availableBalance())?.available; } catch { /* keep going */ }
+      if (avail != null && Number(avail) < floor) {
+        if (this._balanceFloorNotified !== true) {
+          this._balanceFloorNotified = true;
+          await this.notify(
+            mdt`⏸ Entries paused — available balance ${Number(avail).toFixed(2)} USDT is below min_account_balance_usdt (${floor}).`
+            + '\n' + italic('Scanning and position management continue. This will not be repeated.'),
+          );
+        }
+        return;
+      }
+      if (avail != null && this._balanceFloorNotified) {
+        this._balanceFloorNotified = false;
+        await this.notify(mdt`▶️ Entries resumed — balance ${Number(avail).toFixed(2)} USDT is above the ${floor} USDT floor.`);
+      }
     }
 
     // --- the agent is the final gate on every qualified signal
@@ -193,14 +235,47 @@ export class Orchestrator {
   }
 
   async reportLoop() {
+    // A failed read must never be rendered as a zero: "0 positions" and
+    // "I could not reach the exchange" mean opposite things to a trader.
     const [snapshot, balance, stats] = await Promise.all([
-      portfolioSnapshot().catch(() => ({ count: 0, totalPnl: 0, totalMargin: 0, roi: 0, positions: [] })),
-      availableBalance().catch(() => ({ available: 0, margin: 0, frozen: 0, bonus: 0, unrealized: 0 })),
+      portfolioSnapshot().catch((e) => ({ unreadable: e.message, count: 0, totalPnl: 0, totalMargin: 0, roi: 0, positions: [] })),
+      availableBalance().catch((e) => ({ unreadable: e.message, available: 0, margin: 0, frozen: 0, bonus: 0, unrealized: 0 })),
       db.tradeStats(7).catch(() => null),
     ]);
-    // stay quiet when there is genuinely nothing to say
+    const unreadable = snapshot.unreadable || balance.unreadable;
+    if (unreadable) {
+      // Announce once, not every report interval: an unreachable account is a
+      // standing condition too, and repeating it turns a real alarm into
+      // wallpaper. Re-announced only if the error itself changes.
+      if (this._unreadable !== unreadable) {
+        this._unreadable = unreadable;
+        await this.notify([
+          mdt`⚠️ Cannot read the account — reporting paused rather than showing zeros.`,
+          mdt`${unreadable}`,
+          italic('This will not be repeated until it changes or recovers.'),
+        ].join('\n'));
+      }
+      return;
+    }
+    if (this._unreadable) {
+      this._unreadable = null;
+      await this.notify(mdt`✅ Account readable again — reporting resumed.`);
+    }
+    // Stay quiet when there is genuinely nothing to say — but not SILENT.
+    // With no positions and no qualified signals this returned nothing at all,
+    // so an idle bot and a dead bot looked exactly the same from Telegram.
+    // Send a compact heartbeat instead, throttled so it cannot become noise.
     const qualified = this.lastSignals.filter((x) => x.qualified);
-    if (!snapshot.count && !qualified.length) return;
+    if (!snapshot.count && !qualified.length) {
+      const every = Math.max(5, Number(db.settings().heartbeat_minutes ?? 15)) * 60_000;
+      if (Date.now() - (this._lastHeartbeat || 0) < every) return;
+      this._lastHeartbeat = Date.now();
+      await this.notify(
+        mdt`💤 alive · ${this.stats.scans} scans · balance ${Number(balance.available).toFixed(2)} USDT · no positions, no signals`,
+      );
+      return;
+    }
+    this._lastHeartbeat = Date.now();
     await this.notify(formatReport({ snapshot, signals: this.lastSignals.slice(0, 6), balance, stats }));
   }
 
