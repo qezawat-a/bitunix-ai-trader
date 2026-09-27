@@ -4,7 +4,7 @@ import { trailingStop, computeDynamicTpSl } from './risk.js';
 import {
   trailingStep, resetTrailing, trailingSnapshot, evaluateAccountTpSl, closeEverything,
 } from './tpsl.js';
-import { upsertPositionTpSl, closePosition } from './executor.js';
+import { upsertPositionTpSl, closePosition, forgetStop } from './executor.js';
 import { getCandles } from '../scanner/scanner.js';
 import * as I from '../strategies/indicators.js';
 import {
@@ -101,6 +101,7 @@ export async function manageOpenPositions({ notify = null } = {}) {
           + `entry ${t.entry_price}, conf ${t.confidence}, agreement ${t.agreement}.`,
       });
       await setCooldown(t.symbol, Number(s.cooldown_min), 'position closed');
+      forgetStop(t.position_id);
       actions.push({ type: 'booked', symbol: t.symbol, pnl, roi });
       if (notify) {
         await notify(
@@ -127,9 +128,23 @@ export async function manageOpenPositions({ notify = null } = {}) {
     } catch {}
 
     // 1) position with no TP/SL at all -> attach one now (never leave naked)
-    let tpsl = [];
-    try { tpsl = await bitunix.getPendingTpSlOrders({ symbol: p.symbol, positionId: pid }) || []; } catch {}
-    if (!tpsl.length && atr) {
+    //
+    // This read MUST distinguish "the position has no stop" from "I could not
+    // ask". Swallowing the error and treating it as an empty list meant a
+    // transient API failure looked like a naked position, and the rescue below
+    // then wrote a fresh ATR stop over a trailing stop that was already
+    // locking in profit — widening it back out to entry distance. A stop that
+    // had ratcheted to 164.81 on a short from 165.41 was reset to 168.19, so
+    // when price came back it sailed straight through the level that should
+    // have closed the trade.
+    let tpsl = null;
+    try {
+      tpsl = await bitunix.getPendingTpSlOrders({ symbol: p.symbol, positionId: pid }) || [];
+    } catch (e) {
+      log.warn(`${p.symbol}: cannot read TP/SL (${e.message}) — leaving the existing one alone`);
+      tpsl = null;
+    }
+    if (tpsl && !tpsl.length && atr) {
       const synth = computeDynamicTpSl({
         symbol: p.symbol, side: p.side, price: Number(p.avgOpenPrice) || price, atr,
         confidence: Number(record?.confidence || s.min_confidence),
@@ -151,7 +166,9 @@ export async function manageOpenPositions({ notify = null } = {}) {
       }
       const r = await upsertPositionTpSl({
         symbol: p.symbol, positionId: pid, tpPrice: synth.tpPrice, slPrice: synth.slPrice,
+        side: p.side, entry: Number(p.avgOpenPrice) || price,
       });
+      if (r.ok) lastStop.set(pid, r.slPrice ?? synth.slPrice);
       actions.push({ type: 'tpsl_attached', symbol: p.symbol, ok: r.ok, tp: synth.tpPrice, sl: synth.slPrice });
       if (notify && r.ok) {
         await notify(`🛡 *TP/SL attached* — ${p.symbol} ${p.side}\nTP ${synth.tpPrice.toPrecision(8)} | SL ${synth.slPrice.toPrecision(8)}  (${synth.explain})`
@@ -197,9 +214,10 @@ export async function manageOpenPositions({ notify = null } = {}) {
         const improved = prevStop == null
           || (p.side === 'LONG' ? trail.stop > prevStop * 1.0002 : trail.stop < prevStop * 0.9998);
         if (improved) {
-          const existingTp = tpsl[0]?.tpPrice ? Number(tpsl[0].tpPrice) : null;
+          const existingTp = tpsl?.[0]?.tpPrice ? Number(tpsl[0].tpPrice) : null;
           const r = await upsertPositionTpSl({
             symbol: p.symbol, positionId: pid, slPrice: trail.stop, tpPrice: existingTp,
+            side: p.side, entry: Number(p.avgOpenPrice),
           });
           if (r.ok) {
             lastStop.set(pid, trail.stop);

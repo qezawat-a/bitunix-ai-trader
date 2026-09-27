@@ -352,23 +352,57 @@ export async function closeAll(symbol = null) {
 }
 
 /** Update the position-level TP/SL (place if missing, modify if present). */
-export async function upsertPositionTpSl({ symbol, positionId, tpPrice, slPrice }) {
+/**
+ * The furthest-advanced stop we have successfully written for each position.
+ *
+ * A stop is a ratchet: it may tighten toward profit, never loosen back toward
+ * the entry. Every path that writes one (entry, the naked-position rescue, the
+ * trailing engine) goes through here, so the rule is enforced in one place
+ * rather than trusted to each caller — the QNTUSDT short lost its locked-in
+ * profit precisely because the rescue path did not know the trailing engine
+ * had already moved the stop.
+ */
+const bestStop = new Map();     // positionId -> { side, stop }
+
+export function forgetStop(positionId) { bestStop.delete(String(positionId)); }
+export function knownStop(positionId) { return bestStop.get(String(positionId))?.stop ?? null; }
+
+export async function upsertPositionTpSl({ symbol, positionId, tpPrice, slPrice, side = null, entry = null }) {
+  // ---- ratchet guard --------------------------------------------------
+  if (slPrice != null && side) {
+    const key = String(positionId);
+    const prev = bestStop.get(key);
+    if (prev && prev.side === side) {
+      const loosening = side === 'LONG' ? slPrice < prev.stop : slPrice > prev.stop;
+      if (loosening) {
+        log.warn(`${symbol}: refusing to move the stop backwards `
+          + `(${prev.stop} -> ${slPrice} on a ${side}); keeping ${prev.stop}`);
+        slPrice = prev.stop;
+      }
+    }
+  }
+
   const body = { symbol, positionId };
   if (tpPrice != null) body.tpPrice = await bitunix.roundPrice(symbol, tpPrice);
   if (slPrice != null) body.slPrice = await bitunix.roundPrice(symbol, slPrice);
   body.tpStopType = 'MARK_PRICE';
   body.slStopType = 'MARK_PRICE';
 
+  const remember = (mode, res) => {
+    if (slPrice != null && side) bestStop.set(String(positionId), { side, stop: Number(body.slPrice) });
+    return { ok: true, res, mode, slPrice: Number(body.slPrice), tpPrice: body.tpPrice ? Number(body.tpPrice) : null };
+  };
+
   try {
     const existing = await bitunix.getPendingTpSlOrders({ symbol, positionId });
     if (existing && existing.length) {
-      return { ok: true, res: await bitunix.modifyPositionTpSl(body), mode: 'modified' };
+      return remember('modified', await bitunix.modifyPositionTpSl(body));
     }
-    return { ok: true, res: await bitunix.placePositionTpSl(body), mode: 'placed' };
+    return remember('placed', await bitunix.placePositionTpSl(body));
   } catch (e) {
     // duplicate tp/sl -> fall back to modify
     try {
-      return { ok: true, res: await bitunix.modifyPositionTpSl(body), mode: 'modified-fallback' };
+      return remember('modified-fallback', await bitunix.modifyPositionTpSl(body));
     } catch (e2) {
       return { ok: false, reason: `${e.message} | ${e2.message}` };
     }

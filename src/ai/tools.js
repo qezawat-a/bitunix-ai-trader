@@ -9,6 +9,7 @@ import {
   availableBalance, reverse, resetSymbolConfigCache,
 } from '../trading/executor.js';
 import { livePositions, portfolioSnapshot, manageOpenPositions } from '../trading/manager.js';
+import { knownStop } from '../trading/executor.js';
 import * as db from '../db/index.js';
 import * as I from '../strategies/indicators.js';
 
@@ -184,9 +185,28 @@ export const TOOLS = [
   },
   {
     name: 'get_tpsl_orders',
-    description: 'Pending TP/SL orders, optionally for one position.',
+    description: 'Pending TP/SL orders for a position. Returns an explicit '
+      + 'protected/unprotected verdict — an empty list is NOT proof a position '
+      + 'is naked, so never tell the user their stop is missing on this alone.',
     parameters: { type: 'object', properties: { symbol: str, positionId: str } },
-    handler: ({ symbol, positionId }) => bitunix.getPendingTpSlOrders({ symbol, positionId }),
+    handler: async ({ symbol, positionId }) => {
+      const orders = (await bitunix.getPendingTpSlOrders({ symbol, positionId })) || [];
+      // Also read what the ratchet last wrote. The two together tell the agent
+      // whether "no orders returned" means unprotected or just unconfirmed —
+      // reporting an empty list as "you have no stop" was wrong and alarming.
+      const tracked = positionId ? knownStop(positionId) : null;
+      return {
+        orders,
+        count: orders.length,
+        lastStopWritten: tracked,
+        verdict: orders.length
+          ? 'protected'
+          : (tracked != null
+            ? 'unconfirmed — the exchange returned no rows, but a stop was written at '
+              + `${tracked}; re-check before claiming the position is naked`
+            : 'no TP/SL rows returned and none tracked locally'),
+      };
+    },
   },
 
   // ------------------------------------------------------------- EXECUTION ⚠
