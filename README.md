@@ -77,7 +77,7 @@ ANTHROPIC_API_KEY=
 ANTHROPIC_BASE_URL=https://api.anthropic.com/v1
 ANTHROPIC_MODEL=AUTO
 
-DATABASE_URL=postgresql://...neon.tech/neondb?sslmode=require
+DATABASE_URL=postgresql://...neon.tech/neondb?sslmode=verify-full
 
 BITUNIX_API_KEY=
 BITUNIX_API_SECRET=
