@@ -52,6 +52,8 @@ async function main() {
   feed.subscribePrivate();
 
   // ---- telegram --------------------------------------------------------
+  // start() degrades instead of throwing: a bad bot token must not take the
+  // trader down, because the trader is what manages real positions.
   const bot = new TelegramBot();
   const me = await bot.start();
 
@@ -66,16 +68,24 @@ async function main() {
   bot.onMessage(createCommandHandler({ bot, orchestrator }));
 
   const s = settings();
-  for (const id of chatIds) {
-    await bot.sendMessage(id, [
-      mdt`🟢 ${config.agentName} is live as @${me.username}.`,
-      mdt`${pairs.length} pairs · ${s.leverage}x ${s.margin_mode} ${s.position_mode} · order unit ${s.order_unit}`,
-      mdt`gates ${s.min_agreement}/${STRATEGY_COUNT} @ ${s.min_confidence}% · cooldown ${s.cooldown_min}m · reversal ${s.reversal_enabled ? s.reversal_confidence + '%' : 'off'}`,
-      mdt`auto trade ${s.auto_trade ? 'ON' : 'OFF'} · thinking ${s.thinking_level}`,
-      mdt`models: ${ai.status().map((p) => p.model).join(', ')}`,
-      '',
-      md('/help for commands — or just talk to me.'),
-    ].join('\n'));
+  // No bot, no chat ids, or a degraded bot — there is nobody to tell. Say it in
+  // the log instead of crashing on me.username.
+  if (bot.degraded) {
+    log.error('running headless — Telegram is down, so no reports and no /commands. Fix TELEGRAM_BOT_TOKEN to restore control.');
+  } else if (!chatIds.length) {
+    log.warn('no allowed chat ids — startup notice not sent');
+  } else {
+    for (const id of chatIds) {
+      await bot.sendMessage(id, [
+        mdt`🟢 ${config.agentName} is live as @${me.username}.`,
+        mdt`${pairs.length} pairs · ${s.leverage}x ${s.margin_mode} ${s.position_mode} · order unit ${s.order_unit}`,
+        mdt`gates ${s.min_agreement}/${STRATEGY_COUNT} @ ${s.min_confidence}% · cooldown ${s.cooldown_min}m · reversal ${s.reversal_enabled ? s.reversal_confidence + '%' : 'off'}`,
+        mdt`auto trade ${s.auto_trade ? 'ON' : 'OFF'} · thinking ${s.thinking_level}`,
+        mdt`models: ${ai.status().map((p) => p.model).join(', ')}`,
+        '',
+        md('/help for commands — or just talk to me.'),
+      ].join('\n'));
+    }
   }
 
   orchestrator.start();

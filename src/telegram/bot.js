@@ -20,16 +20,45 @@ export class TelegramBot {
     this.handlers = [];
     this.running = false;
     this.me = null;
+    // Set when Telegram auth fails at boot. The trader keeps running with no
+    // Telegram at all: sends become rate-limited no-ops and polling never
+    // starts. A broken bot token must never take the position manager down
+    // with it — that is how an unreachable notification channel turns into
+    // unmanaged live positions.
+    this.degraded = false;
+    this.degradedReason = null;
+    this._lastDegradedWarn = 0;
+  }
+
+  /** Record that Telegram is unreachable, and stop hammering the API. */
+  _degrade(reason) {
+    if (!this.degraded) {
+      this.degraded = true;
+      this.degradedReason = reason;
+      this.running = false;
+      log.error(
+        `telegram unavailable (${reason}) — continuing WITHOUT Telegram. `
+        + `Trading, scanning and position management stay ON, but reports and `
+        + `/commands are unavailable until TELEGRAM_BOT_TOKEN is fixed.`,
+      );
+    }
   }
 
   async call(method, payload = {}) {
-    const res = await fetch(`${this.api}/${method}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
-      signal: AbortSignal.timeout(70_000),
-    });
-    const json = await res.json();
+    let res;
+    try {
+      res = await fetch(`${this.api}/${method}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+        signal: AbortSignal.timeout(70_000),
+      });
+    } catch (e) {
+      // Network/DNS/timeout, not an API-level rejection. Surface the real cause
+      // rather than a JSON parse error from an HTML error page.
+      throw new Error(`${method}: ${e.message}`);
+    }
+    const json = await res.json().catch(() => ({ ok: false, description: `HTTP ${res.status}` }));
     if (!json.ok) {
       const err = new Error(`${method}: ${json.description}`);
       err.description = json.description;
@@ -40,6 +69,14 @@ export class TelegramBot {
   }
 
   async sendMessage(chatId, text, { parseMode = 'MarkdownV2', ...extra } = {}) {
+    if (this.degraded) {
+      const now = Date.now();
+      if (now - this._lastDegradedWarn > 10 * 60_000) {
+        this._lastDegradedWarn = now;
+        log.warn(`dropping telegram message to ${chatId} — telegram is degraded (${this.degradedReason})`);
+      }
+      return [];
+    }
     const parts = chunk(text);
     const sent = [];
     for (const part of parts) {
@@ -113,11 +150,18 @@ export class TelegramBot {
   }
 
   async start() {
-    this.me = await this.call('getMe');
-    log.info(`connected as @${this.me.username}`);
-    await this.setCommands();
-    this.running = true;
-    this._poll();
+    try {
+      this.me = await this.call('getMe');
+      log.info(`connected as @${this.me.username}`);
+      await this.setCommands();
+      this.running = true;
+      this._poll();
+    } catch (e) {
+      // A bad token is a config error, not a reason to abandon live positions.
+      // Degrade: the caller decides whether to keep going; nothing throws.
+      this._degrade(e.message);
+      return null;
+    }
     return this.me;
   }
 
@@ -140,6 +184,12 @@ export class TelegramBot {
           }
         }
       } catch (e) {
+        // 401/403 means the token is bad or revoked. Polling forever would spin
+        // every 2s and burn the quota; degrade and let the trader run.
+        if (e.code === 401 || e.code === 403 || /Unauthorized|bot was blocked|bot is deactivated/i.test(e.message)) {
+          this._degrade(e.message);
+          return;
+        }
         if (!/timeout|aborted/i.test(e.message)) log.warn(`poll: ${e.message}`);
         await new Promise((r) => setTimeout(r, 2000));
       }

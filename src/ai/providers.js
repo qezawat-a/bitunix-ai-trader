@@ -164,26 +164,57 @@ class Provider {
     }
     log.info(`[${this.name}] ${ids.length} models visible, ${ranked.length} chat-capable; probing…`);
 
-    // Probe every candidate, best first. A relay may list dozens of models of
-    // which only a couple are actually wired to a channel, so we do not give up
-    // after the first few — but we cap the wall-clock cost.
+    // Probe in two passes. A model that cannot call tools is USELESS to this
+    // agent — every read of the market, every position, every MCP call is a
+    // tool call — so it must not be able to win a probe. Letting the first
+    // responder win regardless of tool support is how the agent ends up running
+    // on a chat-only model that can only ever emit prose.
+    //
+    // Pass 1 accepts only a real tool-calling round trip. Pass 2 — which runs
+    // ONLY if no model passed pass 1 — downgrades to a tool-less model so that
+    // a relay serving nothing but chat models is still usable for
+    // summaries/autocompact, loudly, rather than leaving the agent dead.
     const budgetMs = 90_000;
     const startedAt = Date.now();
     let probed = 0;
+    let toolLess = null;   // best tool-less responder, kept aside for pass 2
 
+    const outOfBudget = () => Date.now() - startedAt > budgetMs;
+
+    // ---- pass 1: tool calling required
     for (const id of ranked) {
-      if (Date.now() - startedAt > budgetMs) {
+      if (outOfBudget()) {
         log.warn(`[${this.name}] probe budget exhausted after ${probed} models`);
         break;
       }
       probed++;
       const verdict = await this.probe(id);
-      if (verdict.ok) {
-        log.info(`[${this.name}] autoSetModelByKey -> ${id} ✅ (tools: ${verdict.tools ? 'yes' : 'no'}, probed ${probed})`);
+      if (!verdict.ok) {
+        this.blacklist.add(id);
+        log.warn(`[${this.name}] ✗ ${id}: ${verdict.reason}`);
+        continue;
+      }
+      if (verdict.tools) {
+        log.info(`[${this.name}] autoSetModelByKey -> ${id} ✅ (tools: yes, probed ${probed}/${ranked.length})`);
         return id;
       }
-      this.blacklist.add(id);
-      log.warn(`[${this.name}] ✗ ${id}: ${verdict.reason}`);
+      // It answered, but not with tools. Remember the best-ranked one and keep
+      // looking — a capable tool-calling model further down the list beats a
+      // chat-only model at the top of it.
+      if (!toolLess) {
+        toolLess = id;
+        log.warn(`[${this.name}] ${id} works but has NO tool calling — holding as fallback, still probing for one that does`);
+      }
+    }
+
+    // ---- pass 2: nothing supports tools. Degrade, but say so loudly.
+    if (toolLess) {
+      log.warn(
+        `[${this.name}] ⚠️ none of the ${ranked.length} visible model(s) support tool calling. `
+        + `Falling back to ${toolLess}, which CANNOT run tools — the agent will be able to `
+        + `read and write text but NOT execute trades, positions or MCP tools. `
+        + `Pin a tool-capable model with ${this.envVar}=<model-id>.`);
+      return toolLess;
     }
 
     throw new Error(
@@ -202,7 +233,16 @@ class Provider {
   async probe(model) {
     const ask = (tools) => this.chat({
       model,
-      messages: [{ role: 'user', content: 'Reply with the single word: READY' }],
+      messages: [{
+        role: 'user',
+        // Insist on the tool call. "Reply READY" is satisfiable by any chat
+        // model, so a tool-less model would pass a probe that only checks for
+        // text. Naming the tool and using it as the whole reply is the only
+        // answer that proves the tool-calling path actually works.
+        content: tools
+          ? 'Call the ping tool with ok=true. Do not reply with text.'
+          : 'Reply with the single word: READY',
+      }],
       ...(tools ? { tools: PROBE_TOOL } : {}),
       thinking: 'off',
       maxTokens: 64,
@@ -211,9 +251,16 @@ class Provider {
 
     try {
       const r = await ask(true);
-      if (r.content?.trim() || r.toolCalls?.length) {
+      if (r.toolCalls?.length) {
         this.toolSupport.set(model, true);
         return { ok: true, tools: true };
+      }
+      // It answered with prose despite being told to call the tool. That is a
+      // model without tool calling — not a failure, so record it and let the
+      // caller decide whether a tool-less model is good enough.
+      if (r.content?.trim()) {
+        this.toolSupport.set(model, false);
+        return { ok: true, tools: false, reason: 'answered with text instead of calling ping' };
       }
       return { ok: false, reason: 'empty response' };
     } catch (e) {
@@ -225,8 +272,7 @@ class Provider {
         const r = await ask(false);
         if (r.content?.trim()) {
           this.toolSupport.set(model, false);
-          log.warn(`[${this.name}] ${model} works but has NO tool calling — usable only as a fallback`);
-          return { ok: true, tools: false };
+          return { ok: true, tools: false, reason: short(e.message) };
         }
         return { ok: false, reason: 'empty response (no tools)' };
       } catch (e2) {
