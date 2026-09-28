@@ -131,7 +131,7 @@ endpoint. Run `/models list` to see exactly what your key can call.
 | `symbols` | `AUTO` | `AUTO` = rank the **entire** exchange pair list by volume × range |
 | `universe_size` | How many symbols AUTO keeps, best first. The other ~645 pairs are not scanned |
 | `min_24h_volume_usd` | Liquidity floor (default $20M). Thinner pairs are never scanned |
-| `timeframes` | `5m,15m,1h` | First one is the execution timeframe |
+| `timeframes` | `1m,3m,5m,15m` | First one is the execution timeframe (ATR stop/target scale to it) |
 | `min_agreement` | `2` | Distinct strategies that must agree |
 | `min_confidence` | `80` | Consensus confidence gate |
 | `tf_min_confidence` | `60` | Per-timeframe gate for a strategy to get a vote |
@@ -216,7 +216,7 @@ actually call; only genuinely broken keys are blacklisted.
 
 ```
 scan universe (every 15s)
-   └─ 10 strategies × 3 timeframes per symbol
+   └─ 10 strategies × 4 timeframes per symbol
         └─ weighted consensus       ← regime × live performance × timeframe
              └─ mechanical gates    ← agreement, confidence, cooldown, confirm-scans
                   └─ 🧠 AGENT JUDGEMENT
