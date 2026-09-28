@@ -1,4 +1,5 @@
 import bitunix from '../exchange/bitunix.js';
+import { config } from '../config.js';
 import { createLogger } from '../logger.js';
 import * as I from '../strategies/indicators.js';
 import { runAll, regimeWeights, STRATEGIES } from '../strategies/index.js';
@@ -313,7 +314,12 @@ export async function buildUniverse() {
 /** Analyse one symbol across all configured timeframes. */
 export async function analyseSymbol(symbol) {
   const s = settings();
-  const tfs = String(s.timeframes || '5m,15m,1h').split(',').map((x) => x.trim()).filter(Boolean);
+  // The fallback must be the same default config uses, or a missing settings
+  // row silently reverts the scanner to a DIFFERENT set of timeframes than the
+  // operator believes is running — and the first timeframe is the execution
+  // one, so that also changes every ATR stop and target. These two strings used
+  // to be the pre-scalping default (5m,15m,1h) and had drifted out of sync.
+  const tfs = String(s.timeframes || config.defaults.timeframes).split(',').map((x) => x.trim()).filter(Boolean);
 
   // live context for the order-flow strategy
   let depth = null, funding = null;

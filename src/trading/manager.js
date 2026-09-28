@@ -1,4 +1,5 @@
 import bitunix from '../exchange/bitunix.js';
+import { config } from '../config.js';
 import { createLogger } from '../logger.js';
 import { trailingStop, computeDynamicTpSl } from './risk.js';
 import {
@@ -128,7 +129,10 @@ export async function manageOpenPositions({ notify = null } = {}) {
     // candles for ATR
     let atr = null, price = Number(p.avgOpenPrice);
     try {
-      const tf = String(s.timeframes || '5m,15m,1h').split(',')[0].trim();
+      // Same rule as the scanner: the fallback is the configured default, not a
+      // stale copy of it. The first timeframe sizes the ATR stop, so a drifted
+      // fallback here would move stops without the operator changing anything.
+      const tf = String(s.timeframes || config.defaults.timeframes).split(',')[0].trim();
       const candles = await getCandles(p.symbol, tf, 220);
       atr = I.last(I.atr(candles.map((c) => c.high), candles.map((c) => c.low), candles.map((c) => c.close), 14));
       price = I.last(candles.map((c) => c.close));
