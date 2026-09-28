@@ -65,7 +65,10 @@ export const config = {
     universe_rank: str(process.env.UNIVERSE_RANK, 'VOLUME').toUpperCase(),       // VOLUME | GAINERS | LOSERS | MOVERS
     universe_size: num(process.env.UNIVERSE_SIZE, 40),
     min_24h_volume_usd: num(process.env.MIN_24H_VOLUME_USD, 20_000_000),
-    timeframes: str(process.env.TIMEFRAMES, '5m,15m,1h'),
+    // Scalping-first: 1m/3m for entry timing, 5m/15m for structure.
+    // The FIRST timeframe is the execution one, so the ATR stop and target
+    // scale to it — this is a scalper, not a swing trader.
+    timeframes: str(process.env.TIMEFRAMES, '1m,3m,5m,15m'),
 
     auto_trade: bool(process.env.AUTO_TRADE, true),
     scan_interval_sec: num(process.env.SCAN_INTERVAL_SEC, 15),

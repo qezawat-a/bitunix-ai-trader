@@ -14,6 +14,12 @@
  *    complains, so a report is never lost
  */
 
+// Every message that reports an agreement count has to know how many
+// strategies could have voted. Hardcoding 6 turned every report into a lie the
+// moment a strategy was added, and the scan loop crashed on the bare
+// identifier because this module never imported it.
+import { STRATEGY_COUNT } from '../strategies/index.js';
+
 const MDV2_SPECIALS = /[_*[\]()~`>#+\-=|{}.!\\]/g;
 
 /** Escape a dynamic value for MarkdownV2. */

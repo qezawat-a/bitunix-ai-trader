@@ -9,6 +9,7 @@ import { createLogger } from '../logger.js';
 import { config } from '../config.js';
 import * as db from '../db/index.js';
 import { scan, analyseSymbol, consensus } from '../scanner/scanner.js';
+import { STRATEGY_COUNT } from '../strategies/index.js';
 import { dream as dreamCycle, formatDream, gather as gatherDream } from '../ai/dream.js';
 import { validateSetting } from '../settings-schema.js';
 import { availableBalance, closePosition, closeAll, resetSymbolConfigCache } from '../trading/executor.js';
