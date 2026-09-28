@@ -203,6 +203,31 @@ export async function openFromSignal(signal, { aiVerdict = null, marginOverride 
     return { ok: false, reason: `qty ${qty} below minTradeVolume ${minQty} for ${symbol}` };
   }
 
+  // The pair's own ceilings, from GET /api/v1/futures/market/trading_pairs:
+  //   minTradeVolume         minimum opening amount (base currency)
+  //   maxMarketOrderVolume   maximum market order base amount
+  //   maxLimitOrderVolume    maximum limit order base amount
+  //   symbolStatus           OPEN | CANCEL_ONLY | STOP
+  //   isApiSupported         false = API trading disabled
+  // Only the min was ever checked, so an oversized order was discovered by
+  // being rejected at the exchange rather than before it was sent. A position
+  // that is simply too big for the pair should be refused and explained, not
+  // attempted and logged as an exchange error.
+  const maxQty = Number(info?.maxMarketOrderVolume ?? 0);
+  if (maxQty && Number(qty) > maxQty) {
+    return {
+      ok: false,
+      reason: `qty ${qty} above maxMarketOrderVolume ${maxQty} for ${symbol} `
+        + `— lower margin_pct or leverage`,
+    };
+  }
+  if (info && String(info.symbolStatus || 'OPEN').toUpperCase() === 'STOP') {
+    return { ok: false, reason: `${symbol} is STOP — the pair cannot open or close positions` };
+  }
+  if (info && info.isApiSupported === false) {
+    return { ok: false, reason: `${symbol} has API trading disabled (isApiSupported=false)` };
+  }
+
   let realMmr = null;
   try { realMmr = (await bitunix.tierFor({ symbol, notional: marginUsdt * leverage })).mmr; } catch {}
   const risk = computeDynamicTpSl({
