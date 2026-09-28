@@ -5,6 +5,7 @@ import { createLogger } from '../logger.js';
 import { config } from '../config.js';
 import * as db from '../db/index.js';
 import { portfolioSnapshot } from '../trading/manager.js';
+import { STRATEGY_COUNT } from '../strategies/index.js';
 
 const log = createLogger('agent');
 
@@ -184,7 +185,7 @@ SIGNAL
   symbol      ${signal.symbol}
   side        ${signal.side}
   confidence  ${signal.confidence} (raw ${signal.rawConfidence}) — gate is ${s.min_confidence}
-  agreement   ${signal.agreement}/6 — gate is ${s.min_agreement}
+  agreement   ${signal.agreement}/${STRATEGY_COUNT} — gate is ${s.min_agreement}
   regime      ${signal.regime}   (higher TF: ${signal.htfRegime})
   price       ${signal.price}
   ATR%        ${signal.atrPct?.toFixed(3)}

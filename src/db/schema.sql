@@ -121,3 +121,23 @@ CREATE TABLE IF NOT EXISTS agent_events (
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS agent_events_kind_idx ON agent_events (kind, created_at DESC);
+
+
+-- ============================================================
+--  Sessions — a named, resumable slice of a conversation.
+--
+--  "Sessions and resume sessions for long-term memory": a session is a
+--  bookmark into the conversation table, so resuming one restores the
+--  context that was live at that point without re-sending it all.
+-- ============================================================
+CREATE TABLE IF NOT EXISTS sessions (
+  id            BIGSERIAL PRIMARY KEY,
+  chat_id       TEXT NOT NULL,
+  name          TEXT NOT NULL,
+  note          TEXT,
+  covers_until  BIGINT NOT NULL DEFAULT 0,   -- last conversations.id in scope
+  messages      INT NOT NULL DEFAULT 0,
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+  last_resumed  TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS sessions_chat_idx ON sessions (chat_id, last_resumed DESC NULLS LAST, created_at DESC);

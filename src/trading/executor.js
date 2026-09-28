@@ -394,7 +394,11 @@ export async function upsertPositionTpSl({ symbol, positionId, tpPrice, slPrice,
   body.tpStopType = 'MARK_PRICE';
   body.slStopType = 'MARK_PRICE';
 
-  const remember = (mode, res) => {
+  // NOT named `remember`: that identifier is imported from ../db/index.js at
+  // the top of this file, and shadowing it inside this function meant any
+  // future db.remember call added here would silently log a trade outcome
+  // instead of writing a memory.
+  const noted = (mode, res) => {
     if (slPrice != null && side) bestStop.set(String(positionId), { side, stop: Number(body.slPrice) });
     return { ok: true, res, mode, slPrice: Number(body.slPrice), tpPrice: body.tpPrice ? Number(body.tpPrice) : null };
   };
@@ -402,13 +406,13 @@ export async function upsertPositionTpSl({ symbol, positionId, tpPrice, slPrice,
   try {
     const existing = await bitunix.getPendingTpSlOrders({ symbol, positionId });
     if (existing && existing.length) {
-      return remember('modified', await bitunix.modifyPositionTpSl(body));
+      return noted('modified', await bitunix.modifyPositionTpSl(body));
     }
-    return remember('placed', await bitunix.placePositionTpSl(body));
+    return noted('placed', await bitunix.placePositionTpSl(body));
   } catch (e) {
     // duplicate tp/sl -> fall back to modify
     try {
-      return remember('modified-fallback', await bitunix.modifyPositionTpSl(body));
+      return noted('modified-fallback', await bitunix.modifyPositionTpSl(body));
     } catch (e2) {
       return { ok: false, reason: `${e.message} | ${e2.message}` };
     }

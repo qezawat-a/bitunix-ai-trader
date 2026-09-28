@@ -9,6 +9,7 @@ import TelegramBot from './telegram/bot.js';
 import { createCommandHandler } from './telegram/commands.js';
 import Orchestrator from './orchestrator.js';
 import { mdt, md } from './telegram/format.js';
+import { STRATEGY_COUNT } from './strategies/index.js';
 
 const log = createLogger('boot');
 
@@ -69,7 +70,7 @@ async function main() {
     await bot.sendMessage(id, [
       mdt`🟢 ${config.agentName} is live as @${me.username}.`,
       mdt`${pairs.length} pairs · ${s.leverage}x ${s.margin_mode} ${s.position_mode} · order unit ${s.order_unit}`,
-      mdt`gates ${s.min_agreement}/6 @ ${s.min_confidence}% · cooldown ${s.cooldown_min}m · reversal ${s.reversal_enabled ? s.reversal_confidence + '%' : 'off'}`,
+      mdt`gates ${s.min_agreement}/${STRATEGY_COUNT} @ ${s.min_confidence}% · cooldown ${s.cooldown_min}m · reversal ${s.reversal_enabled ? s.reversal_confidence + '%' : 'off'}`,
       mdt`auto trade ${s.auto_trade ? 'ON' : 'OFF'} · thinking ${s.thinking_level}`,
       mdt`models: ${ai.status().map((p) => p.model).join(', ')}`,
       '',

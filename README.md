@@ -3,7 +3,7 @@
 An **agentic AI futures trader** for Bitunix USDT-M perpetuals — not a bot.
 
 A rule-based bot runs a fixed script. This runs a reasoning loop: it scans the
-market with six independent strategies, forms a weighted consensus, and then an
+market with ten independent strategies, forms a weighted consensus, and then an
 LLM with a full tool belt decides — with access to the order book, funding,
 your own trade history and its long-term memory — whether the trade is actually
 worth taking. It talks to you in Telegram like a colleague, remembers what it
@@ -19,12 +19,14 @@ learned in Neon, and exposes everything over MCP.
 | | |
 |---|---|
 | **Agentic, not scripted** | A real think → call tools → observe → decide loop with configurable thinking depth |
-| **6 strategies** | Trend, momentum, squeeze breakout, VWAP reversion, EMA pullback, order-flow/funding |
+| **10 strategies** | `trend_supertrend` `momentum_macd` `squeeze_breakout` `vwap_reversion` `ema_pullback` `orderflow_funding` `rsi_divergence` `bollinger_bounce` `atr_channel_break` `volume_profile` |
 | **Regime-aware consensus** | Strategies are weighted by market regime, timeframe, *and* their live realised performance |
 | **Fully dynamic TP/SL** | ATR × signal strength. No fixed percentages, no min/max knobs — nothing to tune |
+| **Liquidation-aware stops** | Every stop is clamped inside the exchange's liquidation price (`liq_distance`); if it does not fit, leverage is cut instead of the trade taken |
 | **Live protection** | Auto-attaches missing TP/SL, moves to breakeven, then ATR-trails winners |
 | **Reversal engine** | Flips a position when the opposite side clears the reversal threshold |
-| **Neon long-term memory** | Conversations, lessons, trades, per-strategy weights, cooldowns — it learns |
+| **Dream (reflection)** | Off-hours, with a flat book, reviews its own closed trades and writes the patterns back as durable lessons |
+| **Neon long-term memory** | Conversations, sessions, lessons, trades, per-strategy weights, cooldowns — it learns |
 | **Multi-provider AI** | OpenAI-compatible / Gemini / Anthropic with AUTO model detection and failover |
 | **MCP server** | The whole tool belt available to Claude Desktop, Cursor, Cline, other agents |
 | **Telegram** | Full command set *and* free-form conversation |
@@ -140,15 +142,18 @@ endpoint. Run `/models list` to see exactly what your key can call.
 | `breakeven_threshold` | `20` | ROI % at which the stop moves to breakeven |
 | `trailing_trigger_roi_pct` | `25` | ROI % at which ATR trailing begins |
 | `trailing_distance_atr` | How far behind price the trailing stop sits, in ATR (default 0.5) |
+| `liq_distance` | `0.50` | Safety gap between the stop and liquidation, as a fraction of the entry→liq distance |
 | `scan_interval_sec` | `15` | Scanner |
 | `manage_interval_sec` | `15` | Mid-position management |
-| `guard_interval_sec` | `15` | Protection pass |
+| `guard_interval_sec` | `15` | Protection pass — merged into the manage loop, which runs at the faster of the two |
 | `report_interval_sec` | `30` | Telegram report (signals + PnL) |
 | `agent_autonomous_sec` | `15` | Free-running agent initiative |
 | `max_open_positions` | `5` | Concurrency cap |
 | `thinking_level` | `high` | `off` / `low` / `medium` / `high` → 1/3/6/10 tool steps |
 | `autocompact` | `true` | Folds old conversation into summaries |
 | `auto_refresh_model` | `true` | Re-detects the model after failures |
+| `dream_enabled` | `false` | Off-hours reflection over its own closed trades |
+| `dream_interval_hours` | `24` | How often the dream pass runs (skipped while a position is open) |
 
 ```
 /set min_confidence 85
@@ -165,23 +170,32 @@ endpoint. Run `/models list` to see exactly what your key can call.
 **Just talk to it.** "why is BTC weak?", "close everything", "size down, the
 tape is choppy", "what did you learn this week?" — it uses tools and answers.
 
-Leverage and the symbol universe have no dedicated command on purpose: say
-*"go to 20x"* or *"trade only SOL and BTC today"* and the agent applies it
-through its `set_leverage` / `update_settings` tools, having first checked the
-pair's limits and whether anything is open. `/settings` shows the result.
+Every setting has a dedicated command as well as a `/set` path, and the agent
+can still apply any of them from plain language through `set_leverage` /
+`update_settings` — having first checked the pair's limits and whether anything
+is open. `/settings` shows the result.
 
 | Command | |
 |---|---|
-| `/start` `/help` `/status` | Lifecycle |
+| `/start` `/help` `/status` `/diag` | Lifecycle and health |
 | `/balance` `/positions` `/position_history` `/order_history` `/pnl` | Account |
-| `/signal` `/scan` `/analyse SYMBOL` | Analysis |
+| `/signal` `/analyse SYMBOL` | Analysis |
 | `/close SYMBOL\|id` `/closeall` | Execution |
-| `/auto_trade on\|off` | Master switch for opening new positions. Off still scans, reports and manages what is open. `/pause` `/resume` are aliases |
-| `/settings` | All 27 trade settings at a glance |
+| `/auto_trade on\|off` | Master switch for opening new positions. Off still scans, reports and manages what is open |
+| `/scan on\|off` | The scanner only. Separate from `/auto_trade`: with the scanner off, no new signals, but open positions stay fully managed and guarded |
+| `/report on\|off` | The periodic Telegram push. Everything else keeps running |
+| `/leverage [N]` | Show or set leverage. Asks for confirmation while a position is open |
+| `/symbol [SYM,SYM]` | The trading universe, or `AUTO` to rank the whole exchange by volume × range |
+| `/settings` | Every trade setting at a glance |
 | `/settings trade\|signals\|risk\|intervals\|agent` | One section, with what each key does and what it accepts |
 | `/set <key> <value>` | Change one. `/set <key>` alone explains it instead |
-| `/margin_mode …` `/thinking …` | Shortcuts for the common ones |
+| `/margin_mode` `/position_mode` `/order_unit` `/margin_pct` | The sizing and account knobs |
+| `/liq_distance` | How much of the entry→liquidation distance the stop may use |
+| `/breakeven` `/trailing` `/scan_interval` `/guard_interval` | Protection and timing |
+| `/thinking off\|low\|medium\|high` | Reasoning budget per decision |
 | `/memory` | What it has learned |
+| `/memory sessions\|save\|resume\|clear` | Save and restore conversation bookmarks. `/resume` alone is the `/auto_trade` alias, unchanged |
+| `/dream on\|off\|now\|what` | Off-hours reflection over its own closed trades. Writes lessons to memory; never trades |
 | `/skills` `/skills add\|show\|on\|off\|rm` `/reload` | Teach it new judgement |
 | `/model` `/models` | Show the active model per provider, plus anything your key was refused |
 | `/models list [prov]` | Every model your key can actually call, best first |
@@ -190,13 +204,19 @@ pair's limits and whether anything is open. `/settings` shows the result.
 | `/models set <prov> <model>` | Pin a model — it is probed first and refused if unusable |
 | `/models set <prov> AUTO` | Back to automatic |
 
+**Rate limits move the model, not the provider.** A 429 or an overloaded
+response is specific to the model you called, so failing over to a different
+provider would burn a second quota for the same wall. A throttled model goes
+into a 15-minute cooldown and the router picks the next one your key can
+actually call; only genuinely broken keys are blacklisted.
+
 ---
 
 ## How a trade happens
 
 ```
 scan universe (every 15s)
-   └─ 6 strategies × 3 timeframes per symbol
+   └─ 10 strategies × 3 timeframes per symbol
         └─ weighted consensus       ← regime × live performance × timeframe
              └─ mechanical gates    ← agreement, confidence, cooldown, confirm-scans
                   └─ 🧠 AGENT JUDGEMENT
@@ -204,9 +224,14 @@ scan universe (every 15s)
                        ├─ may REFUSE a signal that passed every gate
                        └─ returns {take, confidence, margin_usdt, reasoning}
                             └─ market order + dynamic ATR TP/SL attached atomically
-                                 └─ guard loop: breakeven → ATR trail
+                                 └─ manage+guard loop: breakeven → ATR trail
                                       └─ on close: PnL booked, strategy weights
                                          updated, lesson written to memory
+
+dream loop (every N hours, only with a flat book)
+   └─ reads its own closed trades, per-strategy record, current beliefs
+        └─ asks for the PATTERN, not the individual trades
+             └─ new lessons written back to memory at high importance
 ```
 
 The mechanical gates decide what *reaches* the agent. The agent decides what
@@ -418,16 +443,17 @@ src/
     ws.js               public + private websockets, rate-limited, auto-reconnect
     errors.js           Bitunix error codes → human meaning
   strategies/
-    indicators.js       EMA/RMA/RSI/ATR/MACD/BB/KC/ADX/Supertrend/VWAP/StochRSI/regime
-    index.js            the six strategies + regime weighting
+    indicators.js       EMA/RMA/RSI/ATR/MACD/BB/KC/ADX/Supertrend/VWAP/StochRSI/Donchian/OBV/pivots/regime
+    index.js            the ten strategies + regime weighting
   scanner/scanner.js    universe building, multi-TF analysis, consensus
   trading/
-    risk.js             dynamic TP/SL, ATR trailing, position sizing
+    risk.js             dynamic TP/SL, ATR trailing, liquidation clamps, position sizing
     executor.js         live order placement, reversal, TP/SL upsert
     manager.js          position guard, PnL booking, learning loop
   ai/
-    providers.js        multi-provider router, AUTO model detection, failover
+    providers.js        multi-provider router, AUTO model detection, rate-limit-aware model switching
     agent.js            the reasoning loop, autocompact, signal judgement
+    dream.js            off-hours reflection: own trades + beliefs -> durable lessons
     tools.js            33 tools
     soul.js             system-prompt assembly
   telegram/
@@ -482,7 +508,7 @@ rather than taking the agent down.
 
 - Set `TELEGRAM_ALLOWED_CHAT_IDS`. Without it, anyone who finds the bot can trade your account.
 - Start with a small `margin_pct` and low `leverage` until you trust it.
-- `/pause` stops new entries; the guard keeps protecting what is already open.
+- `/scan off` stops the scanner; the manage+guard loop keeps protecting what is already open.
 - Shutdown (`SIGINT`/`SIGTERM`) does **not** close positions — they stay live on the exchange.
 - Use an API key without withdrawal permission, and set an IP whitelist.
 

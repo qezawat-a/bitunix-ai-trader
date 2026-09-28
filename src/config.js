@@ -94,7 +94,19 @@ export const config = {
     trailing_callback: num(process.env.TRAILING_CALLBACK, 1.5),                // % if RATIO, price if INTERVAL
     account_tp_usdt: num(process.env.ACCOUNT_TP_USDT, 0),                      // 0 = off
     account_sl_usdt: num(process.env.ACCOUNT_SL_USDT, 0),                      // 0 = off
+    // Safety gap kept between the stop and the liquidation price, as a
+    // fraction of the entry->liq distance. 0.50 = the stop may use at most
+    // half the distance to liquidation, i.e. it always sits at least as far
+    // from liq as it is from entry. Lower = tighter stops, more room to be
+    // swept by a wick that grazes liq; higher = safer, but the stop gets
+    // pulled in and the position carries more risk per unit of edge.
+    liq_distance: num(process.env.LIQ_DISTANCE, 0.5),
     heartbeat_minutes: num(process.env.HEARTBEAT_MINUTES, 15),                 // idle 'still alive' ping
+    // Dream: off-hours reflection over its own closed trades and memories.
+    // Off by default because it spends a model call; ON makes the agent
+    // consolidate its lessons once a day and write them back to Neon.
+    dream_enabled: bool(process.env.DREAM_ENABLED, false),
+    dream_interval_hours: num(process.env.DREAM_INTERVAL_HOURS, 24),
 
     max_open_positions: num(process.env.MAX_OPEN_POSITIONS, 5),
     thinking_level: str(process.env.THINKING_LEVEL, 'high'),

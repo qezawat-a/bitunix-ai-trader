@@ -85,7 +85,14 @@ export async function manageOpenPositions({ notify = null } = {}) {
     if (!t.position_id || liveIds.has(String(t.position_id))) continue;
     try {
       const hist = await bitunix.getHistoryPositions({ positionId: t.position_id, limit: 1 });
-      const h = hist?.positionList?.[0];
+      // The SDK documents { positionList: [...] } but get_history_positions has
+      // answered with a bare array before. Reading only .positionList meant h
+      // was undefined on such a response, so the trade was booked with pnl 0
+      // and a null exit price: every closed position looked like a flat loss,
+      // bumpStrategy learned from a number that never happened, and the lesson
+      // written into memory said LOSS for a winning trade. Normalise first.
+      const h = (Array.isArray(hist) ? hist[0] : hist?.positionList?.[0]) || null;
+      if (!h) { log.warn(`${t.position_id}: history returned no row — left open, will retry next pass`); continue; }
       const pnl = Number(h?.realizedPNL ?? 0) - Number(h?.fee ?? 0) + Number(h?.funding ?? 0);
       const roi = t.margin_usdt ? (pnl / Number(t.margin_usdt)) * 100 : null;
       await closeTrade({

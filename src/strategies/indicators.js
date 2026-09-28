@@ -156,8 +156,21 @@ export function supertrend(highs, lows, closes, period = 10, mult = 3) {
     const mid = (highs[i] + lows[i]) / 2;
     let up = mid + mult * a[i];
     let lo = mid - mult * a[i];
-    if (upper != null) up = closes[i - 1] > upper ? Math.max(up, upper) : up;
-    if (lower != null) lo = closes[i - 1] < lower ? Math.min(lo, lower) : lo;
+    // Carry the previous band forward ONLY while price has stayed inside it.
+    // The moment the previous close broke out, the band must RESET to the
+    // freshly computed one, otherwise the band is frozen at the level price
+    // just left and the direction flip needs several more bars to trigger.
+    //
+    // This was inverted (Math.max/Math.min, i.e. keep the old band on a
+    // breakout) which made Supertrend sticky in exactly the trending tape it
+    // is supposed to be fastest in: the flip landed one to three bars late,
+    // and trend_supertrend is the heaviest-weighted strategy in TREND_UP.
+    //
+    // Standard form:
+    //   upper = (basic < prevUpper) || (prevClose > prevUpper) ? basic : prevUpper
+    //   lower = (basic > prevLower) || (prevClose < prevLower) ? basic : prevLower
+    if (upper != null) up = (up < upper || closes[i - 1] > upper) ? up : upper;
+    if (lower != null) lo = (lo > lower || closes[i - 1] < lower) ? lo : lower;
     if (upper != null) trend = closes[i] > upper ? 1 : closes[i] < lower ? -1 : trend;
     upper = up; lower = lo;
     dir[i] = trend;

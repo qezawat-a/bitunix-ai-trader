@@ -125,7 +125,7 @@ export function formatSignal(s) {
   const emoji = s.side === 'LONG' ? '🟩' : '🟥';
   const lines = [
     `${emoji} ${bold(`${s.symbol} ${s.side}`)}`,
-    mdt`confidence ${s.confidence}%  ·  agreement ${s.agreement}/6  ·  regime ${s.regime} (HTF ${s.htfRegime || '—'})`,
+    mdt`confidence ${s.confidence}%  ·  agreement ${s.agreement}/${STRATEGY_COUNT}  ·  regime ${s.regime} (HTF ${s.htfRegime || '—'})`,
     mdt`price ${fmtNum(s.price, 6)}  ·  ATR ${Number(s.atrPct || 0).toFixed(3)}%${s.funding != null ? `  ·  funding ${Number(s.funding).toFixed(4)}%` : ''}`,
     '',
     bold('Strategies'),
@@ -219,6 +219,7 @@ export const SETTING_INFO = {
   reversal_confidence:      ['Confidence required to flip an open position.', '0 – 100'],
 
   // ---- protection
+  liq_distance:             ['Safety gap between the stop and the liquidation price, as a fraction of the entry-to-liq distance. 0.50 = the stop never uses more than half of it.', '0.05 - 0.9'],
   breakeven_threshold:      ['ROI % at which the stop is pulled to entry.', 'percent ROI'],
   trailing_trigger_roi_pct: ['ROI % at which the trailing stop starts following price.', 'percent ROI'],
   trailing_distance_atr:    ['How far behind price the trailing stop sits, in ATR. Smaller = tighter = stopped out sooner.', '0.1 – 5'],
@@ -234,16 +235,18 @@ export const SETTING_INFO = {
   thinking_level:           ['Reasoning budget per decision. Higher = slower, sharper.', 'off / low / medium / high'],
   autocompact:              ['Fold old chat into summaries so context never overflows.', 'true / false'],
   auto_refresh_model:       ['Re-probe and switch model when the active one starts failing.', 'true / false'],
+  dream_enabled:            ['Off-hours reflection: review my own closed trades and write the patterns back as lessons. Never trades.', 'true / false'],
+  dream_interval_hours:     ['How often the dream pass runs (skipped while a position is open).', '1 - 720'],
 };
 
 const SETTING_GROUPS = {
   'Trading':     ['auto_trade', 'leverage', 'margin_mode', 'position_mode', 'order_unit', 'margin_pct', 'max_open_positions', 'symbols', 'universe_rank', 'universe_size', 'min_24h_volume_usd', 'timeframes'],
-  'TP / SL':     ['tp_mode', 'tpsl_method', 'partial_tp_ladder', 'trailing_method', 'trailing_callback', 'trailing_distance_atr', 'trailing_trigger_roi_pct', 'breakeven_threshold', 'account_tp_usdt', 'account_sl_usdt'],
+  'TP / SL':     ['tp_mode', 'tpsl_method', 'partial_tp_ladder', 'trailing_method', 'trailing_callback', 'trailing_distance_atr', 'trailing_trigger_roi_pct', 'breakeven_threshold', 'liq_distance', 'account_tp_usdt', 'account_sl_usdt'],
   'Signal gates': ['min_agreement', 'min_confidence', 'tf_min_confidence', 'signal_confirm_scans', 'cooldown_min'],
   'Reversal':    ['reversal_enabled', 'reversal_confidence'],
   'Protection':  ['breakeven_threshold', 'trailing_trigger_roi_pct', 'trailing_distance_atr'],
   'Intervals':   ['scan_interval_sec', 'manage_interval_sec', 'guard_interval_sec', 'report_interval_sec', 'agent_autonomous_sec'],
-  'Agent':       ['thinking_level', 'autocompact', 'auto_refresh_model'],
+  'Agent':       ['thinking_level', 'autocompact', 'auto_refresh_model', 'dream_enabled', 'dream_interval_hours'],
 };
 
 /** Which group a /settings argument refers to. */
@@ -322,7 +325,7 @@ export function formatReport({ snapshot, signals, balance, stats }) {
   if (qualified.length) {
     lines.push('', bold('Signals'));
     for (const s of qualified) {
-      lines.push(mdt`${s.side === 'LONG' ? '🟩' : '🟥'} ${s.symbol} ${s.side} ${s.confidence}% (${s.agreement}/6) ${s.regime}`);
+      lines.push(mdt`${s.side === 'LONG' ? '🟩' : '🟥'} ${s.symbol} ${s.side} ${s.confidence}% (${s.agreement}/${STRATEGY_COUNT}) ${s.regime}`);
     }
   }
   if (watch.length) {
@@ -352,18 +355,37 @@ export const HELP = [
   '',
   bold('Trading'),
   '/signal — scan now and show signals',
-  '/scan — same as /signal',
   '/analyse SYMBOL — deep multi\\-timeframe analysis',
   '/close SYMBOL\\|positionId — close a position',
   '/closeall — close everything',
   '/auto\\_trade on\\|off — turn auto trading on or off',
+  '/scan on\\|off — the scanner itself (separate from auto trading)',
+  '/report on\\|off — the periodic Telegram push',
   '',
   bold('Configuration'),
   '/settings — every trade setting at a glance',
   '/settings trade\\|signals\\|risk\\|intervals\\|agent — with explanations',
   '/set key value — change a setting',
+  '/leverage [N] — show or set leverage (asks to confirm with positions open)',
   '/margin\\_mode CROSS\\|ISOLATION',
+  '/position\\_mode HEDGE\\|ONE\\_WAY',
+  '/order\\_unit NOMINAL\\|COST\\|QTY',
+  '/symbol [SYMBOL] — the trading universe',
+  '/margin\\_pct [N] — share of available balance per position',
+  '/liq\\_distance [0.05\u20130.9] — how much of the distance to liquidation the stop may use',
+  '/breakeven [ROI%] — ROI at which the stop moves to entry',
+  '/trailing [ROI%] — ROI at which the stop starts following price',
+  '/scan\\_interval [s] · /guard\\_interval [s] · /report [s]',
   '/thinking off\\|low\\|medium\\|high',
+  '',
+  bold('Memory and sessions'),
+  '/memory — what I have learned',
+  '/memory sessions — saved conversation bookmarks',
+  '/memory save NAME — bookmark this conversation',
+  '/memory resume ID — restore a saved conversation',
+  '/memory clear ID — delete a bookmark',
+  '/resume — auto-trade on (the original meaning, kept)',
+  '/dream on\\|off\\|now\\|what — off-hours reflection on my own results',
   '',
   bold('System'),
   '/status — agent, exchange and model status',

@@ -7,6 +7,8 @@ import { scan } from './scanner/scanner.js';
 import { openFromSignal, reverse, availableBalance } from './trading/executor.js';
 import { manageOpenPositions, checkReversal, portfolioSnapshot } from './trading/manager.js';
 import { formatSignal, formatFill, formatReport, agentText, mdt, italic } from './telegram/format.js';
+import { STRATEGY_COUNT } from './strategies/index.js';
+import { dream as dreamCycle, formatDream } from './ai/dream.js';
 
 const log = createLogger('orchestrator');
 
@@ -18,6 +20,7 @@ const log = createLogger('orchestrator');
  *   guard     (guard_interval_sec)       protection: TP/SL, breakeven, trailing
  *   report    (report_interval_sec)      push signals + PnL to Telegram
  *   autonomous(agent_autonomous_sec)     free-running agent initiative
+ *   dream     (dream_interval_hours)      off-hours reflection on own results
  *
  * Every loop is self-rescheduling, so changing an interval with /set takes
  * effect on the next tick without a restart.
@@ -28,6 +31,12 @@ export class Orchestrator {
     this.chatIds = chatIds;
     this.timers = {};
     this.running = false;
+    // Runtime toggles. Both are deliberately NOT settings: they are the
+    // "stop the machine for a minute" switches, where a user wants a switch
+    // that takes effect immediately and does not need a schema entry, a
+    // validator and a database round trip. /scan and /report drive these.
+    this.scanningEnabled = true;
+    this.reportsEnabled = true;
     this.lastSignals = [];
     this.inFlight = new Set();
     this.stats = { scans: 0, signals: 0, trades: 0, reversals: 0, errors: 0, startedAt: Date.now() };
@@ -43,9 +52,9 @@ export class Orchestrator {
     this.running = true;
     this._schedule('scan', 'scan_interval_sec', () => this.scanLoop());
     this._schedule('manage', 'manage_interval_sec', () => this.manageLoop());
-    this._schedule('guard', 'guard_interval_sec', () => this.guardLoop());
     this._schedule('report', 'report_interval_sec', () => this.reportLoop());
     this._schedule('autonomous', 'agent_autonomous_sec', () => this.autonomousLoop());
+    this._schedule('dream', 'dream_interval_hours', () => this.dreamLoop(), 3600);
     log.info('all loops started');
   }
 
@@ -54,13 +63,13 @@ export class Orchestrator {
    * caught, counted and (after a few repeats) reported to Telegram once —
    * then the loop keeps running with exponential backoff until it recovers.
    */
-  _schedule(name, settingKey, fn) {
+  _schedule(name, settingKey, fn, initialSec = null) {
     this.failures = this.failures || {};
     this.failures[name] = { count: 0, notified: false, lastError: null };
 
     const tick = async () => {
       if (!this.running) return;
-      if (this.inFlight.has(name)) { this._arm(name, settingKey, tick); return; }
+      if (this.inFlight.has(name)) { this._arm(name, settingKey, tick, initialSec); return; }
       this.inFlight.add(name);
       const f = this.failures[name];
       try {
@@ -86,20 +95,26 @@ export class Orchestrator {
         try { await db.logEvent('loop_error', { loop: name, error: e.message, count: f.count }); } catch {}
       } finally {
         this.inFlight.delete(name);
-        this._arm(name, settingKey, tick);
+        this._arm(name, settingKey, tick, initialSec);
       }
     };
     this._arm(name, settingKey, tick);
   }
 
-  _arm(name, settingKey, tick) {
+  _arm(name, settingKey, tick, initialSec = null) {
     if (!this.running) return;
-    const base = Math.max(3, Number(db.settings()[settingKey] || 15));
+    // the merged manage+guard pass runs at the faster of the two intervals
+    const s = db.settings();
+    const base = Math.max(3, settingKey === 'manage_interval_sec'
+      ? Math.min(Number(s.manage_interval_sec || 15), Number(s.guard_interval_sec || 15))
+      : Number(s[settingKey] || 15));
     const fails = this.failures?.[name]?.count || 0;
     // back off up to 8x the configured interval while the loop is broken
     const sec = fails ? Math.min(base * Math.min(2 ** fails, 8), 300) : base;
     clearTimeout(this.timers[name]);
-    this.timers[name] = setTimeout(tick, sec * 1000);
+    // The first arm uses initialSec when given: the dream loop must not fire an
+    // hour after boot by way of a 1-second delay that happens to read "1".
+    this.timers[name] = setTimeout(tick, (initialSec ?? sec) * 1000);
   }
 
   rescheduleLoops() { log.info('intervals reloaded'); }
@@ -107,6 +122,7 @@ export class Orchestrator {
   // ----------------------------------------------------------------- loops
 
   async scanLoop() {
+    if (!this.scanningEnabled) return;
     const s = db.settings();
     const signals = await scan();
     this.lastSignals = signals;
@@ -130,7 +146,7 @@ export class Orchestrator {
       for (const { position, signal } of reversals) {
         await this.notify([
           mdt`🔄 REVERSAL — ${signal.symbol}`,
-          mdt`${position.side} → ${signal.side} at ${signal.confidence}% (${signal.agreement}/6), threshold ${s.reversal_confidence}%`,
+          mdt`${position.side} → ${signal.side} at ${signal.confidence}% (${signal.agreement}/${STRATEGY_COUNT}), threshold ${s.reversal_confidence}%`,
         ].join('\n'));
         const verdict = await agent.judgeSignal(signal);
         if (!verdict.take) {
@@ -153,7 +169,7 @@ export class Orchestrator {
         for (const { position, signal } of pending) {
           await this.notify([
             mdt`🔄 REVERSAL SIGNAL — ${signal.symbol}`,
-            mdt`${position.side} → ${signal.side} at ${signal.confidence}% (${signal.agreement}/6)`,
+            mdt`${position.side} → ${signal.side} at ${signal.confidence}% (${signal.agreement}/${STRATEGY_COUNT})`,
             italic('auto trade is OFF — the position was NOT flipped'),
           ].join('\n'));
         }
@@ -212,14 +228,27 @@ export class Orchestrator {
     }
   }
 
+  /**
+   * ONE pass does all of it: book closures, attach missing protection, move to
+   * breakeven, trail winners, evaluate account-level TP/SL.
+   *
+   * manage and guard used to be two separate loops calling the SAME function on
+   * the SAME schedule (both default 15s), so every pass ran twice: the position
+   * scan, the kline fetch for ATR and the pending-TP/SL read were all doubled,
+   * and manage notified Telegram while guard stayed silent — the same stop
+   * move logged twice and pushed once, which made the guard pass look like
+   * extra safety when it was in fact a duplicate of the pass above it.
+   *
+   * They are now one loop, and the two settings it obeys are still separate
+   * (manage_interval_sec, guard_interval_sec): the faster of the two is the
+   * cadence, so a user who shortens the protection interval really does get
+   * tighter protection.
+   */
   async manageLoop() {
-    // mid-position management: book closures, keep protection in sync
-    await manageOpenPositions({ notify: (t) => this.notify(t) });
-  }
-
-  async guardLoop() {
-    // dedicated protection pass (breakeven / trailing), cheap and frequent
-    const { positions, actions } = await manageOpenPositions();
+    const s = db.settings();
+    const { positions, actions } = await manageOpenPositions({
+      notify: (t) => this.notify(t),
+    });
     for (const a of actions) {
       if (a.type === 'stop_moved') {
         log.info(`guard: ${a.symbol} stop -> ${a.stop} (${a.reason})`);
@@ -229,6 +258,12 @@ export class Orchestrator {
   }
 
   async reportLoop() {
+    // /report off silences the PERIODIC push only. The degraded-account
+    // warning below is deliberately exempt: a bot that has silently lost
+    // sight of the account is exactly the failure this project exists to
+    // prevent, and the user asked for quiet, not for blindness.
+    const quiet = !this.reportsEnabled;
+
     // A failed read must never be rendered as a zero: "0 positions" and
     // "I could not reach the exchange" mean opposite things to a trader.
     const [snapshot, balance, stats] = await Promise.all([
@@ -265,6 +300,7 @@ export class Orchestrator {
     // With no positions and no qualified signals this returned nothing at all,
     // so an idle bot and a dead bot looked exactly the same from Telegram.
     // Send a compact heartbeat instead, throttled so it cannot become noise.
+    if (quiet) return;
     const qualified = this.lastSignals.filter((x) => x.qualified);
     if (!snapshot.count && !qualified.length) {
       const every = Math.max(5, Number(db.settings().heartbeat_minutes ?? 15)) * 60_000;
@@ -282,6 +318,32 @@ export class Orchestrator {
   async autonomousLoop() {
     if (!ai.available) return;
     await agent.autonomousTick({ notify: (t) => this.notify(agentText(t).slice(0, 3500)) });
+  }
+
+  /**
+   * Dream. Reflects on its own closed trades and writes consolidated lessons
+   * back to long-term memory. It is the only loop that must not run while the
+   * machine is busy: dream trades nothing, but it spends a long thinking call,
+   * and a reflection that competes with position management for the model is
+   * a reflection that gets a worse answer.
+   */
+  async dreamLoop() {
+    const s = db.settings();
+    if (!s.dream_enabled || !ai.available) return;
+    let busy = null;
+    try { busy = Number((await portfolioSnapshot())?.count || 0); } catch { busy = null; }
+    if (busy === null) {
+      log.warn('dream skipped — could not read the book');
+      return;
+    }
+    if (busy > 0) {
+      log.info(`dream skipped — ${busy} position(s) open`);
+      return;
+    }
+    const r = await dreamCycle();
+    if (!r.ok) { log.warn(`dream: ${r.reason}`); return; }
+    if (r.empty || !r.written) return;    // nothing new is not news
+    await this.notify(formatDream(r).slice(0, 3800));
   }
 
   stop() {

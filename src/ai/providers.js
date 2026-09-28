@@ -88,6 +88,7 @@ class Provider {
     this.failures = 0;
     this.blacklist = new Set();     // models proven unusable with this key
     this.toolSupport = new Map();   // model -> does it do tool calling
+    this.throttledUntil = new Map(); // model -> ts, rate-limited (not blacklisted)
     this.candidates = null;         // ranked, filtered model ids
     this.probing = null;
   }
@@ -129,10 +130,25 @@ class Provider {
       );
     }
 
+    const now = Date.now();
+    for (const [id, until] of this.throttledUntil) if (until <= now) this.throttledUntil.delete(id);
+
     const chat = ids.filter(isChatModel);
-    const ranked = chat
-      .filter((id) => !this.blacklist.has(id))
+    const notRejected = chat.filter((id) => !this.blacklist.has(id));
+    const fresh = notRejected.filter((id) => !this.throttledUntil.has(id))
       .sort((a, b) => rankModel(a) - rankModel(b));
+
+    // Rate-limited models get a 15-minute cooldown, not a blacklist entry. But
+    // if EVERY model is cooling off, "no usable model" is the wrong story — the
+    // truth is "we are temporarily out of quota", and refusing to run is worse
+    // than trying the one whose 15 minutes is closest to up. Only a key that
+    // has genuinely rejected every model it can see is a hard failure.
+    let ranked = fresh;
+    let throttledFallback = false;
+    if (!ranked.length && notRejected.length) {
+      ranked = notRejected.sort((a, b) => rankModel(a) - rankModel(b));
+      throttledFallback = true;
+    }
 
     if (!ranked.length) {
       throw new Error(
@@ -143,6 +159,9 @@ class Provider {
     }
 
     this.candidates = ranked;
+    if (throttledFallback) {
+      log.warn(`[${this.name}] every model is rate-limited; trying them anyway rather than refusing to run`);
+    }
     log.info(`[${this.name}] ${ids.length} models visible, ${ranked.length} chat-capable; probing…`);
 
     // Probe every candidate, best first. A relay may list dozens of models of
@@ -217,10 +236,14 @@ class Provider {
   }
 
   /** Mark the current model bad and immediately resolve the next candidate. */
-  async demote(reason) {
+  async demote(reason, { permanent = true } = {}) {
     if (!this.model || this.pinned) return null;
     log.warn(`[${this.name}] demoting ${this.model}: ${short(reason)}`);
-    this.blacklist.add(this.model);
+    // A throttled model is only skipped for THIS session, not blacklisted for
+    // good — blacklisting it would make /models report a working model as
+    // rejected and would shrink the candidate pool every time a quota is hit.
+    if (permanent) this.blacklist.add(this.model);
+    else this.throttledUntil.set(this.model, Date.now() + 15 * 60_000);
     this.model = null;
     try {
       return await this.ready();
@@ -232,6 +255,21 @@ class Provider {
 }
 
 const short = (m) => String(m).replace(/\s+/g, ' ').slice(0, 140);
+
+/**
+ * Errors that mean "this model is throttled right now" — as opposed to being
+ * unusable, or a network blip.
+ *
+ * The distinction drives a deliberate decision: on a 429 the request is
+ * retried on a DIFFERENT MODEL of the same provider, not handed to a weaker
+ * provider. Rate limits are per-model on every provider that has them, so
+ * switching model is what actually recovers; failing over to another provider
+ * silently downgrades the agent's brain on the single most common runtime
+ * error, which is the opposite of what the model router is for.
+ */
+function isRateLimited(msg) {
+  return /rate[_ -]?limit|too many requests|429|quota|overloaded|503|resource[_ ]exhausted|capacity|try again later|server_error/i.test(String(msg));
+}
 
 /** Errors that mean "this model is not usable with this key" (not a transient fault). */
 function isModelFault(msg) {
@@ -319,16 +357,29 @@ class Gemini extends Provider {
     const model = override || await this.ready();
     const system = messages.filter((m) => m.role === 'system').map((m) => m.content).join('\n\n');
     const contents = [];
+    // Same batching as Anthropic above: parallel tool calls arrive as several
+    // consecutive tool messages and must become one user turn carrying every
+    // functionResponse, or the model loses the pairing.
+    let pendingResponses = [];
+    const flushResponses = () => {
+      if (!pendingResponses.length) return;
+      contents.push({ role: 'user', parts: pendingResponses });
+      pendingResponses = [];
+    };
     for (const m of messages) {
       if (m.role === 'system') continue;
       if (m.role === 'tool') {
-        contents.push({ role: 'user', parts: [{ functionResponse: { name: m.name, response: { result: m.content } } }] });
-      } else if (m.role === 'assistant' && m.tool_calls?.length) {
+        pendingResponses.push({ functionResponse: { name: m.name, response: { result: m.content } } });
+        continue;
+      }
+      flushResponses();
+      if (m.role === 'assistant' && m.tool_calls?.length) {
         contents.push({ role: 'model', parts: m.tool_calls.map((c) => ({ functionCall: { name: c.function.name, args: safeJson(c.function.arguments) } })) });
       } else {
         contents.push({ role: m.role === 'assistant' ? 'model' : 'user', parts: [{ text: m.content || '' }] });
       }
     }
+    flushResponses();
     const body = { contents, generationConfig: { temperature, maxOutputTokens: maxTokens } };
     if (system) body.systemInstruction = { parts: [{ text: system }] };
     if (/2\.5|thinking/i.test(model) && thinking !== 'off') {
@@ -376,11 +427,30 @@ class Anthropic extends Provider {
     const model = override || await this.ready();
     const system = messages.filter((m) => m.role === 'system').map((m) => m.content).join('\n\n');
     const conv = [];
+    // Batch CONSECUTIVE tool results into ONE user message.
+    //
+    // The agent loop runs every tool call the model asked for and emits one
+    // message per result. When the model requests two tools in parallel that
+    // became two user messages in a row, and the Messages API rejects that
+    // with 400 "roles must alternate between user and assistant" — so any turn
+    // where the agent called two tools in parallel died on a real model and
+    // worked on a mock. All of an assistant turn's tool_use blocks must be
+    // answered inside the single user message that follows it.
+    let pendingToolResults = [];
+    const flushToolResults = () => {
+      if (!pendingToolResults.length) return;
+      conv.push({ role: 'user', content: pendingToolResults });
+      pendingToolResults = [];
+    };
+
     for (const m of messages) {
       if (m.role === 'system') continue;
       if (m.role === 'tool') {
-        conv.push({ role: 'user', content: [{ type: 'tool_result', tool_use_id: m.tool_call_id, content: String(m.content).slice(0, 8000) }] });
-      } else if (m.role === 'assistant' && m.tool_calls?.length) {
+        pendingToolResults.push({ type: 'tool_result', tool_use_id: m.tool_call_id, content: String(m.content).slice(0, 8000) });
+        continue;
+      }
+      flushToolResults();
+      if (m.role === 'assistant' && m.tool_calls?.length) {
         conv.push({ role: 'assistant', content: [
           ...(m.content ? [{ type: 'text', text: m.content }] : []),
           ...m.tool_calls.map((c) => ({ type: 'tool_use', id: c.id, name: c.function.name, input: safeJson(c.function.arguments) })),
@@ -461,6 +531,8 @@ export class AIRouter {
       pinned: Boolean(p.pinned),
       failures: p.failures,
       rejected: [...p.blacklist],
+      throttled: [...p.throttledUntil.entries()]
+        .filter(([, until]) => until > Date.now()).map(([id]) => id),
       tools: p.model ? p.toolSupport.get(p.model) !== false : null,
       active: p === this.active,
     }));
@@ -469,7 +541,7 @@ export class AIRouter {
   /** Force a full re-probe on every provider (auto refresh model). */
   async refreshModels({ clearBlacklist = false } = {}) {
     for (const p of this.providers) {
-      if (clearBlacklist) { p.blacklist.clear(); p.toolSupport.clear(); }
+      if (clearBlacklist) { p.blacklist.clear(); p.toolSupport.clear(); p.throttledUntil.clear(); }
       p.model = null;
       p.failures = 0;
       try { await p.ready(); } catch (e) { log.warn(`[${p.name}] ${e.message}`); }
@@ -484,6 +556,7 @@ export class AIRouter {
     if (String(modelId).toUpperCase() === 'AUTO') {
       p.cfg.model = 'AUTO';
       p.blacklist.clear();
+      p.throttledUntil.clear();
       p.model = null;
       await p.ready();
     } else {
@@ -527,10 +600,14 @@ export class AIRouter {
           lastErr = e;
           p.failures++;
           const badModel = isModelFault(e.message);
-          log.warn(`[${p.name}/${p.model}] ${short(e.message)}${badModel ? ' — model rejected' : ''}`);
+          const throttled = isRateLimited(e.message);
+          log.warn(`[${p.name}/${p.model}] ${short(e.message)}${badModel ? ' — model rejected' : throttled ? ' — throttled, switching model' : ''}`);
 
-          if (badModel && !p.pinned && attempt === 0) {
-            const next = await p.demote(e.message);
+          // Rate limit counts as a reason to switch MODEL even though the model
+          // is perfectly usable — the quota belongs to this model id, not to
+          // the key, so the next candidate is the correct recovery.
+          if ((badModel || throttled) && !p.pinned && attempt === 0) {
+            const next = await p.demote(e.message, { permanent: badModel });
             if (next) { log.info(`[${p.name}] retrying with ${next}`); continue; }
           }
           // transient fault or nothing left to try on this provider

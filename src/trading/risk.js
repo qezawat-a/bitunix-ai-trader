@@ -80,8 +80,12 @@ export function estimateLiqPrice({ side, entry, leverage, mmr = 0.005 }) {
  * first and takes the whole margin. The stop must sit in front of liq with
  * room to spare, because liq itself drifts (funding, fees, mark-vs-last).
  */
-export function clampStopInsideLiq({ side, entry, slPrice, liqPrice, buffer = 0.25 }) {
+export function clampStopInsideLiq({ side, entry, slPrice, liqPrice, buffer = null }) {
   if (!liqPrice || !Number.isFinite(liqPrice)) return { slPrice, adjusted: false };
+  // liq_distance is the user-facing control for this; 0.25 was the old fixed
+  // constant. Reading it here means one /set changes every clamp in the system.
+  if (buffer == null) buffer = Number(settings().liq_distance ?? 0.5);
+  buffer = clamp(Number(buffer), 0.05, 0.9);
   const isLong = side === 'LONG';
   const liqDist = Math.abs(Number(entry) - Number(liqPrice));
   // keep the stop at most (1 - buffer) of the way to liquidation
@@ -102,7 +106,9 @@ export function clampStopInsideLiq({ side, entry, slPrice, liqPrice, buffer = 0.
  * liquidation with the safety buffer intact. Used to refuse or de-lever a
  * trade instead of opening one that can only end in liquidation.
  */
-export function maxSafeLeverage({ entry, slDist, mmr = 0.005, buffer = 0.25 }) {
+export function maxSafeLeverage({ entry, slDist, mmr = 0.005, buffer = null }) {
+  if (buffer == null) buffer = Number(settings().liq_distance ?? 0.5);
+  buffer = clamp(Number(buffer), 0.05, 0.9);
   // Solve |entry - liq| >= slDist / (1 - buffer) for leverage, using the
   // published liq formula: |entry - liq| = entry * (1/lev - MMR).
   const needed = Number(slDist) / (1 - buffer);        // required liq distance
@@ -266,7 +272,13 @@ export function computeDynamicTpSl(signal) {
       atrExpansion: Number(signal.atrExpansion) || 1,
       donHigh: signal.donHigh ?? null,
       donLow: signal.donLow ?? null,
-      trailingEnabled: true,
+      // Read the real setting rather than hardcoding true: the "no fixed target,
+      // let it run" branch is only safe while a trailing stop is actually
+      // active. With trailing_method=RATIO/INTERVAL and a position that never
+      // reaches its activation price, the open-ended branch would leave the
+      // position with a stop but no exit.
+      trailingEnabled: String(s.trailing_method || 'ATR').toUpperCase() === 'ATR'
+        && Number(s.auto_trade ?? 1) !== 0,
     });
     tpPrice = t.tpPrice;
     tpBasis = t.basis;

@@ -9,6 +9,7 @@ import { createLogger } from '../logger.js';
 import { config } from '../config.js';
 import * as db from '../db/index.js';
 import { scan, analyseSymbol, consensus } from '../scanner/scanner.js';
+import { dream as dreamCycle, formatDream, gather as gatherDream } from '../ai/dream.js';
 import { validateSetting } from '../settings-schema.js';
 import { availableBalance, closePosition, closeAll, resetSymbolConfigCache } from '../trading/executor.js';
 import { portfolioSnapshot, livePositions, exchangePerformance } from '../trading/manager.js';
@@ -53,7 +54,7 @@ export function createCommandHandler(ctx) {
         '',
         mdt`I am an AI agent trading Bitunix USDT-M futures on a LIVE account.`,
         mdt`auto trade: ${s.auto_trade ? 'ON' : 'OFF'}  ·  universe: ${s.symbols}  ·  ${s.leverage}x ${s.margin_mode} ${s.position_mode}`,
-        mdt`gates: ${s.min_agreement}/6 agreement, ${s.min_confidence}% confidence, ${s.cooldown_min}m cooldown`,
+        mdt`gates: ${s.min_agreement}/${STRATEGY_COUNT} agreement, ${s.min_confidence}% confidence, ${s.cooldown_min}m cooldown`,
         mdt`thinking: ${s.thinking_level}  ·  model: ${ai.status().map((p) => p.model).join(', ')}`,
         '',
         italic('Talk to me normally, or use /help for commands.'),
@@ -106,7 +107,7 @@ export function createCommandHandler(ctx) {
       // 3. loops
       L.push('', bold('Loops'));
       const f = orchestrator?.failures || {};
-      for (const name of ['scan', 'manage', 'guard', 'report', 'autonomous']) {
+      for (const name of ['scan', 'manage', 'report', 'autonomous', 'dream']) {
         const st = f[name];
         if (!st) { L.push(mdt`· ${name}: not started`); continue; }
         L.push(st.count
@@ -136,7 +137,7 @@ export function createCommandHandler(ctx) {
         bold('🧭 Status'), '',
         bold('Agent'),
         mdt`  auto trade ${s.auto_trade ? 'ON' : 'OFF'}  ·  thinking ${s.thinking_level}  ·  autocompact ${s.autocompact}`,
-        mdt`  loops: scan ${s.scan_interval_sec}s · manage ${s.manage_interval_sec}s · guard ${s.guard_interval_sec}s · report ${s.report_interval_sec}s · autonomous ${s.agent_autonomous_sec}s`,
+        mdt`  loops: scan ${s.scan_interval_sec}s · manage+guard ${Math.min(s.manage_interval_sec, s.guard_interval_sec)}s · report ${s.report_interval_sec}s · autonomous ${s.agent_autonomous_sec}s · dream ${s.dream_enabled ? s.dream_interval_hours + 'h' : 'off'}`,
         '',
         bold('Models'),
         ...ai.status().map((p) => mdt`  ${p.provider}: ${p.model}`),
@@ -357,13 +358,13 @@ export function createCommandHandler(ctx) {
         }
       }
       lines.push('');
-      lines.push(c ? mdt`Consensus: ${c.side} ${c.confidence}% (${c.agreement}/6)${c.qualified === false ? ` — blocked: ${c.rejectReason || 'gates'}` : ''}`
+      lines.push(c ? mdt`Consensus: ${c.side} ${c.confidence}% (${c.agreement}/${STRATEGY_COUNT})${c.qualified === false ? ` — blocked: ${c.rejectReason || 'gates'}` : ''}`
         : italic('No consensus — strategies disagree or nothing fired.'));
       await reply(chatId, lines.join('\n'));
       if (c) {
         const r = await agent.run({
           chatId, subject: symbol, persist: false,
-          userMessage: `Give me your honest read on ${symbol} right now. Consensus says ${c.side} at ${c.confidence}% with ${c.agreement}/6 agreement in a ${c.regime} regime. Two short paragraphs: what the setup is, and what would make you not take it.`,
+          userMessage: `Give me your honest read on ${symbol} right now. Consensus says ${c.side} at ${c.confidence}% with ${c.agreement}/${STRATEGY_COUNT} agreement in a ${c.regime} regime. Two short paragraphs: what the setup is, and what would make you not take it.`,
         });
         if (r.text) await reply(chatId, agentText(r.text));
       }
@@ -429,7 +430,7 @@ export function createCommandHandler(ctx) {
         return reply(chatId, [
           bold('▶️ Auto trade ON'),
           '',
-          mdt`I will open positions that clear ${s2.min_agreement}/6 agreement and ${s2.min_confidence}% confidence, up to ${s2.max_open_positions} at once, sizing ${s2.margin_pct}% of available margin each.`,
+          mdt`I will open positions that clear ${s2.min_agreement}/${STRATEGY_COUNT} agreement and ${s2.min_confidence}% confidence, up to ${s2.max_open_positions} at once, sizing ${s2.margin_pct}% of available margin each.`,
           italic('TP/SL are dynamic — ATR x signal strength, set at entry.'),
           warn ? '' : null, warn,
         ].filter((x) => x !== null).join('\n'));
@@ -507,6 +508,246 @@ export function createCommandHandler(ctx) {
       resetSymbolConfigCache();
       await reply(chatId, mdt`✅ margin_mode = ${norm} (cannot change on a symbol that already has a position)`);
     },
+
+
+    // --------------------------------------------------------- quick config
+    // One command per setting the operator actually reaches for. Each is a thin
+    // wrapper over /set, but they exist because "set leverage 20" is a bad way
+    // to talk to an agent and /settings having 30 rows is a bad way to find
+    // one of them. They share one validator, so none of them can accept a
+    // value that the agent's own update_settings tool would reject.
+
+    /** /leverage [n] */
+    async leverage(chatId, args) {
+      const cur = db.settings().leverage;
+      const v = (args[0] || '').trim();
+      if (!v) return reply(chatId, mdt`Leverage: ${cur}x. Usage: /leverage 20`);
+      const n = Number(v);
+      if (!Number.isInteger(n) || n < 1 || n > 125) {
+        return reply(chatId, mdt`Leverage must be a whole number 1–125, got "${v}".`);
+      }
+      const open = await livePositions().catch(() => []);
+      if (open.length) {
+        return reply(chatId, [
+          mdt`⚠️ ${open.length} position(s) are open.`,
+          italic('Leverage only applies to NEW entries — existing positions keep the leverage they were opened at.'),
+          mdt`Change it anyway? /leverage ${n} confirm`,
+        ].join('\n'));
+      }
+      if (args[1] !== 'confirm') {
+        return reply(chatId, mdt`Set leverage to ${n}x? /leverage ${n} confirm`);
+      }
+      await db.setSetting('leverage', n, 'user');
+      resetSymbolConfigCache();
+      await reply(chatId, mdt`✅ leverage = ${n}x (applied per symbol on the next entry, clamped to the pair's tier)`);
+    },
+
+    /** /symbol [AUTO | BTCUSDT,ETHUSDT] */
+    async symbol(chatId, args) {
+      const cur = db.settings().symbols;
+      const v = (args.join(' ')).trim();
+      if (!v) return reply(chatId, [
+        mdt`Universe: ${cur}`,
+        italic('AUTO ranks every USDT pair by volume; a list scans only those.'),
+        mdt`Usage: /symbol AUTO · /symbol BTCUSDT,ETHUSDT,SOLUSDT`,
+      ].join('\n'));
+      await db.setSetting('symbols', v, 'user');
+      await reply(chatId, mdt`✅ universe = ${db.settings().symbols}`);
+    },
+
+    /** /position_mode HEDGE|ONE_WAY — hedge mode is what the executor assumes */
+    async position_mode(chatId, args) {
+      const v = (args[0] || '').toUpperCase();
+      const cur = db.settings().position_mode;
+      if (!['HEDGE', 'ONE_WAY'].includes(v)) {
+        return reply(chatId, [
+          mdt`Current: ${cur}. Usage: /position_mode HEDGE|ONE_WAY`,
+          italic('HEDGE = long and short at the same time (what the executor is built for). ONE_WAY = net position per symbol.'),
+          italic('Bitunix refuses this change while a position is open.'),
+        ].join('\n'));
+      }
+      const open = await livePositions().catch(() => []);
+      if (open.length) {
+        return reply(chatId, mdt`❌ ${open.length} position(s) open — close them first. Bitunix will not switch mode with exposure.`);
+      }
+      await db.setSetting('position_mode', v, 'user');
+      resetSymbolConfigCache();
+      await reply(chatId, mdt`✅ position_mode = ${v}`);
+    },
+
+    /** /order_unit NOMINAL|COST|QTY — how a size is read (help centre id=170) */
+    async order_unit(chatId, args) {
+      const v = (args[0] || '').toUpperCase();
+      const cur = db.settings().order_unit;
+      if (!['NOMINAL', 'COST', 'QTY'].includes(v)) {
+        return reply(chatId, [
+          mdt`Current: ${cur}. Usage: /order_unit NOMINAL|COST|QTY`,
+          mdt`• *COST* — you size in USDT margin. qty = cost × leverage ÷ price`,
+          mdt`• *NOMINAL* — you size in position value. qty = nominal ÷ price`,
+          mdt`• *QTY* — you size in base coin (BTC, SOL …).`,
+        ].join('\n'));
+      }
+      await db.setSetting('order_unit', v, 'user');
+      await reply(chatId, mdt`✅ order_unit = ${v} — next entry is sized that way.`);
+    },
+
+    /** /margin_pct <n> — % of available balance committed as margin per trade */
+    async margin_pct(chatId, args) {
+      const cur = db.settings().margin_pct;
+      const v = (args[0] || '').trim();
+      if (!v) return reply(chatId, mdt`Margin per trade: ${cur}% of available balance. Usage: /margin_pct 3`);
+      const r = await db.setSetting('margin_pct', v, 'user').catch((e) => ({ error: e.message }));
+      if (r?.error) return reply(chatId, mdt`❌ ${r.error}`);
+      await reply(chatId, mdt`✅ margin_pct = ${db.settings().margin_pct}% of available balance per trade`);
+    },
+
+    /** /liq_distance <0.05-0.9> — safety gap between stop and liquidation */
+    async liq_distance(chatId, args) {
+      const cur = db.settings().liq_distance;
+      const v = (args[0] || '').trim();
+      if (!v) return reply(chatId, [
+        mdt`liq_distance: ${cur}`,
+        italic('The stop may use at most this fraction of the entry→liquidation distance. 0.50 keeps the stop at least as far from liquidation as it is from entry.'),
+        mdt`Usage: /liq_distance 0.6`,
+      ].join('\n'));
+      const r = await db.setSetting('liq_distance', v, 'user').catch((e) => ({ error: e.message }));
+      if (r?.error) return reply(chatId, mdt`❌ ${r.error}`);
+      await reply(chatId, mdt`✅ liq_distance = ${db.settings().liq_distance} — applied to the next stop the agent places or moves.`);
+    },
+
+    /** /breakeven <roi %> */
+    async breakeven(chatId, args) {
+      const cur = db.settings().breakeven_threshold;
+      const v = (args[0] || '').trim();
+      if (!v) return reply(chatId, mdt`Breakeven at ${cur}% ROI. Usage: /breakeven 20`);
+      const r = await db.setSetting('breakeven_threshold', v, 'user').catch((e) => ({ error: e.message }));
+      if (r?.error) return reply(chatId, mdt`❌ ${r.error}`);
+      await reply(chatId, mdt`✅ breakeven_threshold = ${db.settings().breakeven_threshold}% ROI`);
+    },
+
+    /** /trailing <roi %> — ROI at which the ATR trail starts */
+    async trailing(chatId, args) {
+      const cur = db.settings().trailing_trigger_roi_pct;
+      const v = (args[0] || '').trim();
+      if (!v) return reply(chatId, [
+        mdt`Trailing starts at ${cur}% ROI. Usage: /trailing 25`,
+        mdt`Distance behind price: ${db.settings().trailing_distance_atr} ATR (/set trailing_distance_atr 0.5)`,
+      ].join('\n'));
+      const r = await db.setSetting('trailing_trigger_roi_pct', v, 'user').catch((e) => ({ error: e.message }));
+      if (r?.error) return reply(chatId, mdt`❌ ${r.error}`);
+      await reply(chatId, mdt`✅ trailing_trigger_roi_pct = ${db.settings().trailing_trigger_roi_pct}% ROI`);
+    },
+
+    /** /scan_interval <sec> */
+    async scan_interval(chatId, args) {
+      const cur = db.settings().scan_interval_sec;
+      const v = (args[0] || '').trim();
+      if (!v) return reply(chatId, mdt`Scan interval: ${cur}s. Usage: /scan_interval 30`);
+      const r = await db.setSetting('scan_interval_sec', v, 'user').catch((e) => ({ error: e.message }));
+      if (r?.error) return reply(chatId, mdt`❌ ${r.error}`);
+      orchestrator.rescheduleLoops();
+      await reply(chatId, mdt`✅ scan_interval_sec = ${db.settings().scan_interval_sec}`);
+    },
+
+    /** /guard_interval <sec> — cadence of the merged manage/protection pass */
+    async guard_interval(chatId, args) {
+      const cur = db.settings().guard_interval_sec;
+      const v = (args[0] || '').trim();
+      if (!v) return reply(chatId, [
+        mdt`Protection pass: every ${Math.min(db.settings().manage_interval_sec, cur)}s (the faster of manage ${db.settings().manage_interval_sec}s and guard ${cur}s).`,
+        mdt`Usage: /guard_interval 10`,
+      ].join('\n'));
+      const r = await db.setSetting('guard_interval_sec', v, 'user').catch((e) => ({ error: e.message }));
+      if (r?.error) return reply(chatId, mdt`❌ ${r.error}`);
+      orchestrator.rescheduleLoops();
+      await reply(chatId, mdt`✅ guard_interval_sec = ${db.settings().guard_interval_sec} — protection now runs every ${Math.min(db.settings().manage_interval_sec, db.settings().guard_interval_sec)}s`);
+    },
+
+    /** /report on|off */
+    async report(chatId, args) {
+      const v = (args[0] || '').toLowerCase();
+      if (!['on', 'off'].includes(v)) {
+        const every = Math.max(10, Number(db.settings().report_interval_sec));
+        return reply(chatId, [
+          mdt`Reports: ${orchestrator.running ? 'ON' : 'stopped'} · every ${every}s`,
+          mdt`Usage: /report off — stops the periodic push.`,
+          italic('Scanning, trading and position management are unaffected.'),
+        ].join('\n'));
+      }
+      orchestrator.reportsEnabled = v === 'on';
+      await reply(chatId, v === 'on'
+        ? mdt`✅ Reports ON — signals, price and PnL every ${db.settings().report_interval_sec}s.`
+        : mdt`✅ Reports OFF — I stay quiet until you talk to me or something needs saying.`);
+    },
+
+    /** /scan on|off — the scanner, independent of auto trading */
+    async scan(chatId, args) {
+      const v = (args[0] || '').toLowerCase();
+      if (!['on', 'off'].includes(v)) {
+        return reply(chatId, [
+          mdt`Scanner: ${orchestrator.scanningEnabled ? 'ON' : 'OFF'} · every ${db.settings().scan_interval_sec}s`,
+          mdt`Usage: /scan off — stops scanning. Existing positions keep being managed.`,
+          italic('Separate from /auto_trade: with the scanner off I stop looking for entries but still guard what is open.'),
+        ].join('\n'));
+      }
+      orchestrator.scanningEnabled = v === 'on';
+      await reply(chatId, v === 'on'
+        ? mdt`✅ Scanner ON.`
+        : mdt`✅ Scanner OFF — no new signals. Open positions are still managed and guarded.`);
+    },
+
+    /**
+     * /dream [on|off|now] — off-hours reflection on my own results.
+     *
+     * Reads closed trades, the per-strategy record and what I already believe,
+     * then writes back the patterns as durable lessons. It never trades and
+     * never changes a setting: it may think, not act.
+     */
+    async dream(chatId, args) {
+      const v = (args[0] || '').toLowerCase();
+
+      if (v === 'now') {
+        await reply(chatId, mdt`💤 Dreaming — reading my own history. One moment.`);
+        const r = await dreamCycle();
+        return reply(chatId, formatDream(r).slice(0, 3800));
+      }
+      if (v === 'what' || v === 'status') {
+        const d = await gatherDream().catch(() => null);
+        if (!d) return reply(chatId, mdt`❌ I could not read my own history right now.`);
+        const p = d.performance;
+        return reply(chatId, [
+          bold('💤 What I would reflect on'),
+          mdt`Window: last ${d.windowDays} days`,
+          mdt`Trades ${p.trades} · wins ${p.wins} · losses ${p.losses} · PnL ${Number(p.pnl || 0).toFixed(2)} USDT`,
+          mdt`Memories I hold: ${d.memories.length}`,
+          '',
+          bold('Per-strategy record'),
+          ...(d.strategyTable.length
+            ? d.strategyTable.map((r) => mdt`· ${r.strategy}: ${r.wins}W/${r.losses}L · pnl ${Number(r.pnl).toFixed(2)} · weight ${Number(r.weight).toFixed(2)}`)
+            : [italic('(none yet)')]),
+        ].join('\n'));
+      }
+
+      if (['on', 'off'].includes(v)) {
+        await db.setSetting('dream_enabled', v === 'on', 'user');
+        orchestrator.rescheduleLoops();
+        return reply(chatId, v === 'on'
+          ? mdt`✅ Dream ON — every ${db.settings().dream_interval_hours}h, when nothing is open, I review my own results and write the lessons down. /dream now to run it immediately.`
+          : mdt`✅ Dream OFF. I will keep trading exactly as before — I just stop reviewing my own results.`);
+      }
+
+      const s = db.settings();
+      return reply(chatId, [
+        mdt`Dream: ${s.dream_enabled ? 'ON' : 'OFF'} · every ${s.dream_interval_hours}h`,
+        mdt`Usage: /dream on | /dream off | /dream now | /dream what`,
+        italic('Reflection only. Dream never places an order and never changes a setting on its own.'),
+      ].join('\n'));
+    },
+
+    // aliases people type without the underscore
+    async breakeven_threshold(chatId, args) { return commands.breakeven(chatId, args); },
+    async scaninterval(chatId, args) { return commands.scan_interval(chatId, args); },
+    async guard_interval_sec(chatId, args) { return commands.guard_interval(chatId, args); },
 
     async thinking(chatId, args) {
       const v = (args[0] || '').toLowerCase();
@@ -691,13 +932,88 @@ export function createCommandHandler(ctx) {
     },
 
     // --------------------------------------------------------------- memory
+    /**
+     * /memory                       -> what has been learned (durable memories)
+     * /memory <text>                -> search those memories
+     * /memory sessions              -> resumable conversation bookmarks
+     * /memory save <name> [note]    -> bookmark the conversation right now
+     * /memory resume <id>           -> re-inject everything said since that point
+     * /memory clear <id>            -> forget the bookmark (the chat is untouched)
+     *
+     * /resume is deliberately NOT this: it stays the alias for resuming AUTO
+     * TRADING, which is what it has always meant here and what muscle memory
+     * expects. Session resume lives under /memory so the two never collide.
+     */
     async memory(chatId, args) {
+      const sub = (args[0] || '').toLowerCase();
+
+      if (sub === 'sessions') {
+        const list = await db.listSessions(chatId, 12);
+        if (!list.length) {
+          return reply(chatId, [
+            mdt`No saved sessions for this chat yet`,
+            mdt`Save one with  /memory save <name>`,
+          ].join('\n'));
+        }
+        const lines = [bold('💾 Sessions — long-term memory bookmarks'), ''];
+        for (const x of list) {
+          const when = new Date(x.last_resumed || x.created_at).toISOString().slice(0, 16).replace('T', ' ');
+          lines.push(mdt`${x.id}. *${x.name}* — ${x.messages} msgs · ${when}`
+            + (x.since_msgs ? mdt`  (${x.since_msgs} since)` : '')
+            + (x.note ? mdt`  \n   _${x.note}_` : ''));
+        }
+        lines.push('', italic('/memory resume <id> · /memory clear <id>'));
+        return reply(chatId, lines.join('\n'));
+      }
+
+      if (sub === 'save') {
+        const name = args.slice(1).join(' ').trim();
+        if (!name) return reply(chatId, mdt`Usage: /memory save <name> [note]`);
+        const sess = await db.createSession({ chatId, name });
+        return reply(chatId, mdt`✅ saved session *${sess.name}* (id ${sess.id}) covering ${sess.covers_until} messages.`
+          + mdt`   Resume it any time with /memory resume ${sess.id}`);
+      }
+
+      if (sub === 'resume') {
+        const id = Number(args[1]);
+        if (!Number.isInteger(id)) return reply(chatId, mdt`Usage: /memory resume <id>`);
+        const tail = await db.sessionTail(id, 60);
+        if (!tail) return reply(chatId, mdt`No session with id ${id}.`);
+        await db.touchSession(id);
+        const { session, messages } = tail;
+        if (!messages.length) {
+          return reply(chatId, mdt`Session *${session.name}* is the tip of the conversation — nothing to restore.`);
+        }
+        // Re-inject as a single user turn: the agent loop reads history from
+        // Neon, so the cleanest way to restore a window is to hand it the
+        // transcript and let it continue from there.
+        const transcript = messages
+          .filter((m) => m.role !== 'tool')
+          .map((m) => `${m.role}: ${String(m.content).slice(0, 600)}`)
+          .join('\n');
+        const r = await agent.run({
+          chatId,
+          userMessage: `Resuming session "${session.name}" (id ${session.id}). Here is everything said since that point:\n\n${transcript}\n\nAcknowledge briefly what we were doing and continue from there.`,
+        });
+        return reply(chatId, agentText(r.text || '(no answer)'));
+      }
+
+      if (sub === 'clear' || sub === 'rm') {
+        const id = Number(args[1]);
+        if (!Number.isInteger(id)) return reply(chatId, mdt`Usage: /memory clear <id>`);
+        const ok = await db.deleteSession(id);
+        return reply(chatId, ok
+          ? mdt`🗑 session ${id} forgotten. (The conversation itself is untouched.)`
+          : mdt`No session with id ${id}.`);
+      }
+
       const mems = args.length
         ? await db.searchMemories(args.join(' '), 15)
         : await db.recall({ limit: 15 });
       if (!mems.length) return reply(chatId, 'Nothing in long\\-term memory yet\\.');
       const lines = [bold('🧠 Long-term memory'), ''];
       for (const m of mems) lines.push(mdt`[${m.kind}${m.subject ? '/' + m.subject : ''}] ${m.content}`);
+      lines.push('', italic('/memory sessions — saved, resumable sessions'));
       await reply(chatId, lines.join('\n'));
     },
   };

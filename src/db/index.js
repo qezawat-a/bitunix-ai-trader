@@ -330,3 +330,74 @@ export async function recentEvents(limit = 20) {
     `SELECT kind, symbol, payload, created_at FROM agent_events ORDER BY id DESC LIMIT $1`, [limit]);
   return rows;
 }
+
+/* ------------------------------------------------------------------ sessions
+ *
+ * A session is a bookmark, not a copy. Resuming one sets the conversation
+ * window the agent reads from back to that point instead of the last N
+ * messages, so "go back to where we were discussing the funding squeeze"
+ * actually restores that context.
+ */
+
+/** Create a session bookmark at the current end of the conversation. */
+export async function createSession({ chatId, name, note = null, coversUntil = null }) {
+  if (!chatId || !name) throw new Error('createSession needs chatId and name');
+  let until = coversUntil;
+  if (until == null) {
+    const r = await q('SELECT COALESCE(MAX(id), 0) AS id FROM conversations WHERE chat_id = $1', [chatId]);
+    until = Number(r.rows[0]?.id || 0);
+  }
+  const cnt = await countMessagesSince(chatId, until);
+  const { rows } = await q(
+    `INSERT INTO sessions (chat_id, name, note, covers_until, messages)
+     VALUES ($1, $2, $3, $4, $5) RETURNING *`,
+    [chatId, String(name).slice(0, 80), note, until, cnt],
+  );
+  return rows[0];
+}
+
+/** List a chat's sessions, most recently useful first. */
+export async function listSessions(chatId, limit = 10) {
+  const { rows } = await q(
+    `SELECT s.*,
+            (SELECT COUNT(*) FROM conversations c
+              WHERE c.chat_id = s.chat_id AND c.id > s.covers_until) AS since_msgs
+       FROM sessions s
+      WHERE s.chat_id = $1
+      ORDER BY COALESCE(s.last_resumed, s.created_at) DESC
+      LIMIT $2`,
+    [chatId, limit],
+  );
+  return rows;
+}
+
+/**
+ * Mark a session as resumed. The agent's own window is restored by
+ * summarising everything after covers_until into the session note, which is
+ * what "resume" means in practice — see the caller in commands.js.
+ */
+export async function touchSession(id) {
+  const { rows } = await q(
+    `UPDATE sessions SET last_resumed = now() WHERE id = $1 RETURNING *`, [id],
+  );
+  return rows[0] || null;
+}
+
+/** Delete one session. The conversation itself is untouched. */
+export async function deleteSession(id) {
+  const { rowCount } = await q('DELETE FROM sessions WHERE id = $1', [id]);
+  return rowCount > 0;
+}
+
+/** Every message after a session's bookmark — what would be re-injected. */
+export async function sessionTail(sessionId, limit = 60) {
+  const { rows: s } = await q('SELECT * FROM sessions WHERE id = $1', [sessionId]);
+  if (!s[0]) return null;
+  const { rows } = await q(
+    `SELECT * FROM conversations
+      WHERE chat_id = $1 AND id > $2
+      ORDER BY id ASC LIMIT $3`,
+    [s[0].chat_id, s[0].covers_until, limit],
+  );
+  return { session: s[0], messages: rows };
+}

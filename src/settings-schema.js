@@ -16,11 +16,13 @@ export const NUMERIC = new Set([
   'report_interval_sec', 'agent_autonomous_sec', 'min_agreement',
   'min_confidence', 'tf_min_confidence', 'signal_confirm_scans', 'cooldown_min',
   'reversal_confidence', 'breakeven_threshold', 'trailing_trigger_roi_pct',
-  'trailing_distance_atr', 'max_open_positions',
+  'trailing_distance_atr', 'max_open_positions', 'liq_distance',
+  'dream_interval_hours',
 ]);
 
 export const BOOLEAN = new Set([
   'auto_trade', 'reversal_enabled', 'autocompact', 'auto_refresh_model',
+  'dream_enabled',
 ]);
 
 /** Inclusive bounds for the numeric keys that have a sane range. */
@@ -38,7 +40,7 @@ const RANGES = {
   guard_interval_sec: [5, 3600],
   report_interval_sec: [10, 86400],
   agent_autonomous_sec: [5, 86400],
-  min_agreement: [1, 6],
+  min_agreement: [1, 10],
   min_confidence: [0, 100],
   tf_min_confidence: [0, 100],
   signal_confirm_scans: [1, 10],
@@ -48,6 +50,8 @@ const RANGES = {
   trailing_trigger_roi_pct: [0, 1000],
   trailing_distance_atr: [0.1, 5],
   max_open_positions: [1, 50],
+  liq_distance: [0.05, 0.9],
+  dream_interval_hours: [1, 720],
 };
 
 const ENUMS = {
