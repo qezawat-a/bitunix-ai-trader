@@ -6,7 +6,8 @@
  */
 import 'dotenv/config';
 import { config } from '../src/config.js';
-import { pool, migrate, seedSettings, loadSettings } from '../src/db/index.js';
+import { connect, close, migrate, seedSettings, loadSettings, dbInfo } from '../src/db/index.js';
+import { redactUrl } from '../src/db/connection.js';
 import bitunix from '../src/exchange/bitunix.js';
 import ai from '../src/ai/providers.js';
 import { runAll } from '../src/strategies/index.js';
@@ -19,7 +20,13 @@ let failures = 0;
 
 async function step(title, fn) {
   console.log(`\n${title}`);
-  try { await fn(); } catch (e) { bad(e.message); failures++; }
+  try {
+    await fn();
+  } catch (e) {
+    bad(e.message);
+    for (const hint of e.hints || []) console.log(`     → ${hint}`);
+    failures++;
+  }
 }
 
 console.log('🩺 Bitunix AI Trader — doctor\n══════════════════════════════');
@@ -32,6 +39,7 @@ await step('1. Environment', async () => {
     TELEGRAM_BOT_TOKEN: config.telegram.token,
   };
   for (const [k, v] of Object.entries(req)) v ? ok(k) : (bad(`${k} missing`), failures++);
+  if (config.db.url) console.log(`     ${redactUrl(config.db.url)} (from ${config.db.source})`);
   const keys = ['openai', 'gemini', 'anthropic'].filter((p) => config.ai[p].key);
   keys.length ? ok(`AI keys: ${keys.join(', ')}`) : (bad('no AI key'), failures++);
   config.telegram.allowed.length
@@ -39,7 +47,10 @@ await step('1. Environment', async () => {
     : warn('TELEGRAM_ALLOWED_CHAT_IDS empty — anyone can command the agent');
 });
 
-await step('2. Neon database', async () => {
+await step('2. Database', async () => {
+  await connect();
+  const i = dbInfo();
+  ok(`${i.server} at ${i.host} — db ${i.database} as ${i.user}, ssl ${i.ssl} (from ${i.source})`);
   await migrate(); ok('schema applied');
   const s = await seedSettings(); ok(`${Object.keys(s).length} settings`);
   await loadSettings(); ok('settings loaded');
@@ -118,5 +129,5 @@ await step('7. Telegram', async () => {
 
 console.log(`\n══════════════════════════════`);
 console.log(failures ? `❌ ${failures} problem(s) — fix before going live` : '✅ All checks passed — safe to start');
-await pool.end();
+await close();
 process.exit(failures ? 1 : 0);

@@ -4,20 +4,167 @@ import { fileURLToPath } from 'node:url';
 import pg from 'pg';
 import { config } from '../config.js';
 import { createLogger } from '../logger.js';
+import {
+  explainDbError, isRetryable, parseTarget, probeSsl, redactUrl,
+  sslCorrection, sslLabel, sslPolicy, stripSslParams, validateUrl,
+} from './connection.js';
 
 const log = createLogger('db');
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
-export const pool = new pg.Pool({
-  connectionString: config.db.url,
-  ssl: config.db.url.includes('sslmode=disable') ? false : { rejectUnauthorized: false },
-  max: 5,
-  idleTimeoutMillis: 30_000,
-});
+const int = (v, d) => (Number.isFinite(Number(v)) && Number(v) > 0 ? Number(v) : d);
+const CONNECT_ATTEMPTS = int(process.env.DB_CONNECT_ATTEMPTS, 10);
+const CONNECT_TIMEOUT_MS = int(process.env.DB_CONNECT_TIMEOUT_MS, 15_000);
+const POOL_MAX = int(process.env.DB_POOL_MAX, 5);
 
-pool.on('error', (e) => log.warn('pool error:', e.message));
+const dbUrl = config.db.url;
+const dbSource = config.db.source;
+
+/**
+ * TLS is a property of the *server*, not of our preference, so it is not
+ * frozen at import time: we start from the best guess and let the handshake
+ * correct us (see `connect`). Private Railway Postgres and public Neon then
+ * both work from the same code with no flags — including the very common case
+ * of a `?sslmode=require` copied off a Neon example onto an internal host.
+ *
+ * The exception is `verify-ca`/`verify-full`: downgrading a stated security
+ * requirement because the server asked nicely is how you get MITM'd, so that
+ * one is pinned and a mismatch is left to fail loudly.
+ */
+const policy = sslPolicy(dbUrl);
+let ssl = policy.ssl;
+const sslPinned = policy.pinned;
+
+function buildPool() {
+  const p = new pg.Pool({
+    // sslmode stripped: the driver would otherwise let the URL overrule `ssl`
+    // below, which is the decision we just took. See stripSslParams().
+    connectionString: stripSslParams(dbUrl),
+    ssl,
+    max: POOL_MAX,
+    idleTimeoutMillis: 30_000,
+    connectionTimeoutMillis: CONNECT_TIMEOUT_MS,
+    keepAlive: true,            // PaaS networks drop idle TCP without it
+  });
+  p.on('error', (e) => log.warn('pool error:', e.message));
+  return p;
+}
+
+// `let` + ESM live bindings: importers keep seeing the current pool after a
+// transport switch, so `import { pool }` and `db.pool.query(...)` stay valid.
+export let pool = buildPool();
 
 export const q = (text, params) => pool.query(text, params);
+
+/** What we ended up connected to — for logs, /status and the health endpoint. */
+let info = { connected: false, url: redactUrl(dbUrl), source: dbSource, ssl: sslLabel(ssl) };
+export const dbInfo = () => ({ ...info });
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+async function switchSsl(next, why) {
+  if (sslLabel(ssl) === sslLabel(next)) return false;
+  log.warn(`server says TLS should be ${sslLabel(next)} (${why}) — reconnecting`);
+  ssl = next;
+  const old = pool;
+  pool = buildPool();
+  try { await old.end(); } catch {}
+  return true;
+}
+
+/**
+ * Open the database, and keep trying.
+ *
+ * Two things make a deploy fail where localhost succeeds. The container boots
+ * before the platform's private network resolves, so the very first connection
+ * loses a race it will win a second later — hence the backoff. And the
+ * transport may not be what the URL implies — hence the probe and the
+ * mid-flight correction. Both are recoverable, so neither should be fatal.
+ */
+export async function connect({ attempts = CONNECT_ATTEMPTS, baseDelayMs = 1000 } = {}) {
+  const problems = validateUrl(dbUrl, dbSource);
+  if (problems.length) {
+    const e = new Error(problems[0]);
+    e.hints = problems.slice(1);
+    e.fatal = true;
+    throw e;
+  }
+
+  const target = parseTarget(dbUrl);
+  log.info(`connecting to ${redactUrl(dbUrl)} (from ${dbSource}), ssl ${sslLabel(ssl)} — ${policy.reason}`);
+
+  // Ask the server what it actually speaks instead of trusting the hostname
+  // (or the URL, which is usually copied from somewhere else).
+  if (!sslPinned && target) {
+    const supports = await probeSsl(target.host, target.port);
+    if (supports === true && ssl === false) await switchSsl({ rejectUnauthorized: false }, 'handshake probe');
+    if (supports === false && ssl !== false) {
+      if (policy.explicit) log.warn(`${policy.reason}, but ${target.host} does not offer TLS — overriding`);
+      await switchSsl(false, 'handshake probe');
+    }
+  }
+
+  let lastErr;
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    try {
+      const client = await pool.connect();
+      try {
+        const { rows } = await client.query(
+          'SELECT current_database() AS db, current_user AS "user", version() AS version',
+        );
+        const server = String(rows[0].version).split(' ').slice(0, 2).join(' ');
+        info = {
+          connected: true,
+          url: redactUrl(dbUrl),
+          source: dbSource,
+          ssl: sslLabel(ssl),
+          database: rows[0].db,
+          user: rows[0].user,
+          server,
+          host: target?.host,
+        };
+        log.info(`connected — ${server}, db ${rows[0].db} as ${rows[0].user}, ssl ${sslLabel(ssl)}`);
+        return dbInfo();
+      } finally {
+        client.release();
+      }
+    } catch (e) {
+      lastErr = e;
+
+      // "You knocked on the wrong door" — retry immediately on the right one,
+      // without spending an attempt.
+      const fix = sslPinned ? null : sslCorrection(e);
+      if (fix && await switchSsl(fix === 'off' ? false : { rejectUnauthorized: false }, e.message)) {
+        attempt--;
+        continue;
+      }
+
+      if (!isRetryable(e) || attempt === attempts) break;
+      const delay = Math.min(baseDelayMs * 2 ** (attempt - 1), 8000);
+      log.warn(`connect attempt ${attempt}/${attempts} failed (${e.code || e.message}) — retrying in ${delay}ms`);
+      await sleep(delay);
+    }
+  }
+
+  const { headline, hints } = explainDbError(lastErr, { url: dbUrl, source: dbSource, ssl });
+  const err = new Error(headline);
+  err.cause = lastErr;
+  err.hints = hints;
+  throw err;
+}
+
+/**
+ * Shut the pool down, once.
+ *
+ * Always prefer this to `pool.end()`: a TLS switch replaces the pool, and any
+ * caller that destructured `pool` at import time is holding the retired one —
+ * ending that twice throws "Called end on pool more than once".
+ */
+export async function close() {
+  const p = pool;
+  if (!p || p.ended || p.ending) return;
+  try { await p.end(); } catch (e) { log.warn(`pool close: ${e.message}`); }
+}
 
 export async function migrate() {
   const sql = fs.readFileSync(path.join(__dirname, 'schema.sql'), 'utf8');

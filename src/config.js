@@ -1,8 +1,13 @@
 import 'dotenv/config';
+import { resolveDatabaseUrl } from './db/connection.js';
 
 const bool = (v, d) => (v === undefined || v === '' ? d : String(v).toLowerCase() === 'true');
 const num = (v, d) => (v === undefined || v === '' || Number.isNaN(Number(v)) ? d : Number(v));
 const str = (v, d) => (v === undefined || v === '' ? d : String(v));
+
+// DATABASE_URL is the standard name, but a PaaS may only give you
+// DATABASE_PUBLIC_URL, POSTGRES_URL or the discrete PG* parts — accept them all.
+const database = resolveDatabaseUrl(process.env);
 
 /**
  * Static / boot configuration.
@@ -35,7 +40,18 @@ export const config = {
     },
   },
 
-  db: { url: str(process.env.DATABASE_URL, '') },
+  db: { url: database.url, source: database.source },
+
+  // Hosting platforms want a listening port to call the service healthy, and
+  // restart anything that never binds one. Worker-only locally, web-shaped in
+  // the cloud: see src/health.js.
+  http: {
+    port: num(process.env.PORT || process.env.HEALTH_PORT, 0),
+    enabled: bool(
+      process.env.HEALTH_SERVER,
+      Boolean(process.env.PORT || process.env.HEALTH_PORT || process.env.RAILWAY_ENVIRONMENT),
+    ),
+  },
 
   bitunix: {
     key: str(process.env.BITUNIX_API_KEY, ''),
@@ -127,6 +143,15 @@ export function assertBootConfig() {
   const anyAi = config.ai.openai.key || config.ai.gemini.key || config.ai.anthropic.key;
   if (!anyAi) missing.push('at least one of OPENAI_COMPATIBLE_KEY / GEMINI_GOOGLE_KEY / ANTHROPIC_API_KEY');
   if (missing.length) {
-    throw new Error(`Missing required environment variables:\n  - ${missing.join('\n  - ')}`);
+    const err = new Error(`Missing required environment variables:\n  - ${missing.join('\n  - ')}`);
+    // A deploy fails here far more often than a laptop does: locally the
+    // values are in .env, in the cloud someone has to put them on the service.
+    err.hints = [
+      'Locally these come from .env. On a hosting platform they must be set on the service itself.',
+      'Railway: service → Variables. A variable on the project/Postgres service is NOT visible to this service unless referenced.',
+      'Variables are applied at deploy time — redeploy after adding them.',
+    ];
+    err.fatal = true;
+    throw err;
   }
 }

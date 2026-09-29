@@ -1,6 +1,7 @@
 import { config, assertBootConfig } from './config.js';
 import { createLogger } from './logger.js';
-import { migrate, seedSettings, loadSettings, settings, pool, logEvent } from './db/index.js';
+import { connect as connectDb, migrate, seedSettings, loadSettings, settings, close as closeDb, logEvent } from './db/index.js';
+import { startHealthServer, stopHealthServer, setHealth } from './health.js';
 import bitunix from './exchange/bitunix.js';
 import feed from './exchange/ws.js';
 import ai from './ai/providers.js';
@@ -23,13 +24,20 @@ async function main() {
   console.log(BANNER);
   log.warn('LIVE TRADING — there is no dry-run mode. Real orders will be placed.');
 
+  // Bind the port first: the platform's health probe starts the moment the
+  // container is up, and a slow database must not read as a dead service.
+  startHealthServer();
+
   assertBootConfig();
 
   // ---- database -------------------------------------------------------
+  setHealth('connecting to database');
+  await connectDb();
+  setHealth('migrating');
   await migrate();
   await seedSettings();
   await loadSettings();
-  log.info('neon connected, settings loaded');
+  log.info('database connected, settings loaded');
 
   // ---- exchange sanity check -----------------------------------------
   const pairs = await bitunix.getTradingPairs();
@@ -80,16 +88,19 @@ async function main() {
 
   orchestrator.start();
   await logEvent('agent_started', { pairs: pairs.length, settings: s });
+  setHealth('running');
   log.info('🚀 agent running');
 
   // ---- shutdown --------------------------------------------------------
   const shutdown = async (sig) => {
     log.warn(`${sig} — shutting down (open positions are NOT closed)`);
+    setHealth('shutting down');
     orchestrator.stop();
     bot.stop();
     feed.stop();
+    stopHealthServer();
     try { await logEvent('agent_stopped', { signal: sig }); } catch {}
-    try { await pool.end(); } catch {}
+    await closeDb();
     process.exit(0);
   };
   process.on('SIGINT', () => shutdown('SIGINT'));
@@ -99,6 +110,12 @@ async function main() {
 }
 
 main().catch((e) => {
-  log.error(e.stack || e.message);
+  // A crashed deploy shows only this. Make it the whole story: what broke,
+  // and what to change — not a stack trace through the pg driver.
+  log.error(e.message);
+  for (const hint of e.hints || []) log.error(`   → ${hint}`);
+  if (!e.hints?.length && e.stack) log.error(e.stack);
+  if (e.cause?.stack && process.env.LOG_LEVEL === 'debug') log.error(e.cause.stack);
+  setHealth('crashed', e.message);
   process.exit(1);
 });

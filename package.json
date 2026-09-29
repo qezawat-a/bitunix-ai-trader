@@ -13,6 +13,8 @@
     "mcp": "node src/mcp/server.js",
     "migrate": "node src/db/migrate.js",
     "doctor": "node scripts/doctor.js",
+    "db:check": "node scripts/db-check.js",
+    "test": "node --test tests/*.test.mjs",
     "mcp:config": "node scripts/mcp-config.js",
     "mcp:test": "node scripts/mcp-test.js"
   },

@@ -43,10 +43,13 @@ npm install
 cp .env.example .env
 $EDITOR .env          # fill in the keys
 
-npm run doctor        # verify env, Neon, Bitunix auth, AI, Telegram
-npm run migrate       # create the Neon schema
+npm run doctor        # verify env, database, Bitunix auth, AI, Telegram
+npm run migrate       # create the schema
 npm start             # 🚀 live
 ```
+
+Deploying instead of running locally? See [Deploying](#deploying) — and
+`npm run db:check` if the database is the thing that will not come up.
 
 `npm run doctor` is not optional — it validates your Bitunix signature, your
 Neon connection and your AI keys *before* real money is at stake.
@@ -162,6 +165,99 @@ endpoint. Run `/models list` to see exactly what your key can call.
 /set symbols AUTO
 /set reversal_confidence 90
 ```
+
+---
+
+## Deploying
+
+The agent is a worker: it polls Telegram and the exchange and holds websockets
+open. Anywhere that runs `npm start` and keeps the process alive works — a
+VPS under `systemd`/`pm2`, Railway, Render, Fly.
+
+### The database transport is detected, not configured
+
+The one thing that differs between a laptop and a host is how the database
+wants to be spoken to, and the URL does not reliably say. A private Postgres
+(`postgres.railway.internal`, a compose service, `10.x`) speaks plain TCP and
+hangs up on a TLS handshake with `The server does not support SSL
+connections`. A managed one (Neon, Supabase, RDS) requires TLS but presents a
+certificate that the container has no root for.
+
+So on boot the agent performs the Postgres `SSLRequest` handshake against your
+server, uses whatever it answers, and re-negotiates if it still guessed wrong.
+`?sslmode=require` copied from someone else's example onto a private host is
+overridden, with a warning, instead of crashing the deploy.
+
+Override it only if you need to:
+
+```bash
+DATABASE_SSL=disable        # or require / verify-full  (PGSSLMODE works too)
+DB_CONNECT_ATTEMPTS=10      # boot retries — private networking needs a moment
+DB_CONNECT_TIMEOUT_MS=15000
+DB_POOL_MAX=5
+```
+
+`verify-ca` / `verify-full` are the exception: a stated security requirement is
+never downgraded automatically, so a mismatch there fails loudly by design.
+
+### Railway
+
+1. **New Project → Deploy from GitHub repo**, pick this repo.
+2. **Add a database.** Either Railway's own (*New → Database → PostgreSQL*) or
+   an external Neon URL — both work unchanged.
+3. **Wire the variable.** On the *app* service → **Variables** →
+   **New Variable → Add Reference → Postgres → `DATABASE_URL`**.
+   This is the step that is usually missed: a variable that lives on the
+   Postgres service, or in the project's shared variables, is **not** visible
+   to the app service until it is referenced. Typing `${{Postgres.DATABASE_URL}}`
+   by hand only works if the service is really named `Postgres` — otherwise it
+   arrives verbatim and the agent will tell you so.
+4. Add the rest: `BITUNIX_API_KEY`, `BITUNIX_API_SECRET`, `TELEGRAM_BOT_TOKEN`,
+   `TELEGRAM_ALLOWED_CHAT_IDS`, and one AI key. Variables apply at deploy
+   time — **redeploy** after adding them.
+5. Deploy. `railway.json` and `nixpacks.toml` in the repo pin Node 22, the
+   start command and an `ON_FAILURE` restart policy.
+
+Two Railway-specific traps the code now handles for you:
+
+- **Private networking is not up instantly.** `postgres.railway.internal` can
+  fail to resolve for the first second or two of a container's life. Boot
+  retries with backoff rather than exiting.
+- **It is IPv6-only, and same-project-only.** If the database lives in another
+  project or environment, the private host will never resolve — use
+  *Postgres → Variables → `DATABASE_PUBLIC_URL`* instead. If a platform insists
+  on A records, `NODE_OPTIONS=--dns-result-order=ipv6first`.
+
+A `/health` endpoint is served on `$PORT` (default `8080`) whenever the
+platform provides one, because a process that never binds a port gets culled
+as unhealthy:
+
+```json
+{ "ok": true, "phase": "running", "uptimeSec": 421,
+  "db": { "connected": true, "host": "postgres.railway.internal", "ssl": "off" } }
+```
+
+Set `HEALTH_SERVER=false` to switch it off, or `HEALTH_PORT` to move it.
+
+### When a deploy crashes
+
+```bash
+npm run db:check         # DNS → TCP → TLS → auth → permissions, in order
+```
+
+It needs no exchange, AI or Telegram keys, prints no secrets, and writes
+nothing, so it is safe to run against production (`railway run npm run db:check`).
+Each failure names the fix rather than the stack frame:
+
+```
+2. DNS
+  ❌ ENOTFOUND — "postgres.railway.internal" does not resolve here
+     → Private networking only resolves inside the same Railway project+environment
+     → If the app and the database are in different projects, use DATABASE_PUBLIC_URL
+```
+
+`npm test` covers the connection layer, including a fake Postgres that refuses
+TLS — the exact Railway failure — as a regression test.
 
 ---
 
@@ -461,15 +557,21 @@ src/
     commands.js         command router + free-form conversation
     format.js           MarkdownV2 escaping (see below)
   db/
-    schema.sql          Neon schema
-    index.js            data access, degrades gracefully if Neon blips
+    schema.sql          Postgres schema
+    connection.js       URL resolution, TLS negotiation, errors that name the fix
+    index.js            data access, degrades gracefully if the database blips
+  health.js             /health on $PORT, so hosts do not cull the worker
   mcp/server.js         MCP stdio server
 scripts/
   doctor.js             7-step pre-flight
+  db-check.js           database-only diagnosis: DNS → TCP → TLS → auth → grants
   mcp-config.js         generate an MCP client config
   mcp-test.js           smoke-test the MCP server       pre-flight check
+tests/                  node --test: the connection layer, incl. a fake Postgres
 soul/                   SOUL.md · SKILL.md · STYLE.md
   skills/               drop-in .md skills, auto-loaded
+railway.json            build/start/restart policy
+nixpacks.toml           pins Node 22 for the Nixpacks builder
 ```
 
 ---
