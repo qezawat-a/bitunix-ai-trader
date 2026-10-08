@@ -238,17 +238,12 @@ export function adaptiveTarget({
  * The pick below is the human's design task (see the TODO marker in the body).
  */
 export function stopAtrFor(signal, s) {
-  // Size off the first STRUCTURE timeframe: the first configured TF AFTER the
-  // execution one (the first entry) that produced a valid ATR. A TF whose
-  // candles failed is absent from signal.timeframes and is skipped. With none
-  // valid, fall back to the execution ATR.
-  const tfs = String(s?.timeframes || '1m').split(',').map((x) => x.trim()).filter(Boolean);
-  const exec = tfs[0] || '1m';
-  for (const tf of tfs.slice(1)) {
-    const a = Number(signal.timeframes?.[tf]?.atr);
-    if (Number.isFinite(a) && a > 0) return { atr: a, tf };
-  }
-  return { atr: Number(signal.atr) || 0, tf: exec };
+  // TODO(human): pick the sizing ATR here.
+  //   signal.timeframes — per-TF analysis; a TF whose candles failed is absent
+  //   s.timeframes      — "1m,3m,5m,15m" (first entry = the execution TF)
+  //   return { atr, tf } — tf names the timeframe actually used
+  const tf = String(s?.timeframes || '1m').split(',')[0].trim();
+  return { atr: Number(signal.atr) || 0, tf };
 }
 
 export function computeDynamicTpSl(signal) {
