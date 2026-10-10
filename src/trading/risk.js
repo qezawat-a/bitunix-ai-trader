@@ -138,6 +138,122 @@ export function maxSafeLeverage({ entry, slDist, mmr = 0.005, buffer = null }) {
 }
 
 /**
+ * Which risk tier a position of this notional value falls into.
+ *
+ * Bands come from get_position_tiers and do not necessarily cover every value
+ * a position can reach, so the lookup degrades deliberately:
+ *
+ *   - inside a band      -> that band
+ *   - below the first    -> the first band
+ *   - above EVERY band   -> the TOP band
+ *
+ * The last case matters: a position larger than the top tier is the MOST
+ * exposed one there is, so it must resolve to the top tier rather than to
+ * "no tier". Resolving it to nothing would make reductionLadder() report no
+ * cascade and inReductionZone() report "safe" for precisely the position the
+ * exchange would come after first.
+ *
+ * Pure and synchronous — tierFor() in the exchange client delegates here so
+ * the MMR used to size a stop and the MMR used to model a reduction can never
+ * come from two different notions of the same band.
+ */
+export function tierAt(tiers, notional) {
+  const list = Array.isArray(tiers) ? tiers : [];
+  if (!list.length) return null;
+  const v = Number(notional) || 0;
+  const sorted = [...list].sort((a, b) => Number(a.startValue) - Number(b.startValue));
+  return sorted.find((t) => v > Number(t.startValue) && v <= Number(t.endValue))
+    || sorted.find((t) => v <= Number(t.endValue))
+    || sorted[sorted.length - 1];
+}
+
+/**
+ * The tiered risk-limit cascade Bitunix runs BEFORE a forced liquidation.
+ *
+ * Liquidation is not a single event. Per the help-centre article
+ * "Bitunix Futures Liquidation Mechanism and Tiered Risk Limit", when a
+ * position falls short of its maintenance margin the exchange:
+ *
+ *   1. cancels open orders to release margin,
+ *   2. if still short AND the position sits above tier 1, PARTIALLY closes it
+ *      to drop it into the tier below — the P&L credits straight to balance,
+ *      the leg is sent FOK, and an FOK that fails liquidates the whole
+ *      position,
+ *   3. repeats until the position is back inside its margin requirement,
+ *   4. liquidates outright only once it is already at tier 1.
+ *
+ * The reduction is documented with one worked example:
+ *
+ *   "the user holds a position with the value of 5,000,000 USDT and the risk
+ *    limit tier is 4 ... Reduced Value = Position Value - Limit Amount of the
+ *    Original Level, namely 5,000,000 - 2,500,000 = 2,500,000 USDT"
+ *
+ * The "Limit Amount of the Original Level" is the floor of the current tier,
+ * i.e. the ceiling of the tier below it. So one step down is simply:
+ *
+ *   newNotional = tier.startValue
+ *
+ * This matters to the bot because a position above tier 1 is not "safe until
+ * the liquidation price" — it is exposed to the exchange closing chunks of it
+ * at market first, while the software stop is still untouched. The stop is
+ * sized for the FULL position; after a reduction the order-level tp/sl rows
+ * still carry the pre-reduction slQty and no longer match what is left.
+ *
+ * Returns the ladder of steps, nearest tier first. An empty array means the
+ * position is already at the bottom tier (tier 1), where the next step is
+ * full liquidation rather than a reduction.
+ *
+ * @param tiers  position tiers from get_position_tiers, ascending by startValue
+ * @param notional  position value in USDT
+ */
+export function reductionLadder(tiers, notional) {
+  const v = Number(notional) || 0;
+  if (!Array.isArray(tiers) || !tiers.length || !(v > 0)) return [];
+
+  const ladder = [];
+  // Each step recomputes the tier from the reduced notional, exactly as the
+  // exchange does after every reduction.
+  let current = v;
+  const seen = new Set();
+  for (let guard = 0; guard < tiers.length + 1; guard++) {
+    const t = tierAt(tiers, current);
+    if (!t || t.level <= 1 || seen.has(t.level)) break;
+    seen.add(t.level);
+    const next = Number(t.startValue);
+    if (!(next > 0) || next >= current) break;
+    const below = tiers.find((x) => x.level === t.level - 1) || null;
+    ladder.push({
+      fromLevel: t.level,
+      toLevel: below ? below.level : t.level - 1,
+      fromNotional: current,
+      toNotional: next,
+      closesNotional: current - next,
+      // The MMR that applied is what made the position short of margin; the
+      // reduced leg is what the exchange will actually leave behind.
+      fromMmr: Number(t.mmr),
+      toMmr: below ? Number(below.mmr) : null,
+      // FOK, and a failed FOK liquidates the entire position.
+      orderType: 'FOK',
+    });
+    current = next;
+  }
+  return ladder;
+}
+
+/**
+ * Is this position exposed to a forced partial reduction before liquidation?
+ *
+ * True whenever the position sits above tier 1 for its notional. It is not a
+ * prediction that it will happen — it says that IF margin runs short, the
+ * exchange closes part of the position at market before liquidating any of
+ * it, so any software stop sized for the whole position goes stale the moment
+ * a leg is taken.
+ */
+export function inReductionZone(tiers, notional) {
+  return reductionLadder(tiers, notional).length > 0;
+}
+
+/**
  * Choose a target from what the tape is actually doing, instead of a fixed
  * multiple of the stop.
  *

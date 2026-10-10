@@ -2,6 +2,7 @@ import { config } from '../config.js';
 import { createLogger } from '../logger.js';
 import { signRest, buildQueryString } from './sign.js';
 import { BitunixError } from './errors.js';
+import { tierAt } from '../trading/risk.js';
 
 const log = createLogger('bitunix');
 
@@ -136,10 +137,11 @@ export class BitunixClient {
   }
 
   // GET /api/v1/futures/market/get_funding_rate_history
-  // NOTE: the docs spell the start parameter "starTime" (sic) — sent verbatim.
+  // limit defaults to 100, max 200. startTime/endTime are the funding
+  // SETTLEMENT window, in unix milliseconds.
   getFundingRateHistory({ symbol, startTime, endTime, limit = 100 }) {
     return this._get('/api/v1/futures/market/get_funding_rate_history',
-      { symbol, starTime: startTime, endTime, limit }, false);
+      { symbol, startTime, endTime, limit }, false);
   }
 
   // ----------------------------------------------------------------- account
@@ -244,19 +246,27 @@ export class BitunixClient {
    */
   async tierFor({ symbol, notional }) {
     const tiers = await this.positionTiers(symbol);
-    const v = Number(notional) || 0;
-    return tiers.find((t) => v > t.startValue && v <= t.endValue)
-      || tiers.find((t) => v <= t.endValue)
-      || tiers[tiers.length - 1];
+    return tierAt(tiers, notional);
   }
 
   // ------------------------------------------------------------------- trade
   /**
    * POST /api/v1/futures/trade/place_order
-   * HEDGE mode: side BUY + tradeSide OPEN  = open long
-   *             side SELL + tradeSide OPEN = open short
-   *             side SELL + tradeSide CLOSE + positionId = close long
-   *             side BUY  + tradeSide CLOSE + positionId = close short
+   *
+   * HEDGE mode (from the official doc, verbatim):
+   *   open long   -> side "BUY",  tradeSide "OPEN"
+   *   open short  -> side "SELL", tradeSide "OPEN"
+   *   close long  -> side "BUY",  tradeSide "CLOSE"  + positionId
+   *   close short -> side "SELL", tradeSide "CLOSE"  + positionId
+   *
+   * `side` names the POSITION, not the order direction: closing a long is a
+   * BUY, not a SELL. This reads backwards but it is what the exchange expects,
+   * and it is the same LONG/SHORT vs BUY/SELL mismatch that makes passing the
+   * bot's own `side` as a filter return nothing.
+   *
+   * Nothing in this repo sends tradeSide CLOSE — closes go through
+   * flashClosePosition(positionId), which needs no side. Kept here so the
+   * mapping is right if a reversal ever stops using the flash path.
    */
   placeOrder(params) {
     const body = {
@@ -390,6 +400,10 @@ export class BitunixClient {
   }
 
   // GET /api/v1/futures/tpsl/get_pending_orders
+  // limit defaults to 10, max 100. `side` and `positionMode` are int32 in the
+  // docs, not the BUY/SELL strings trade/place_order uses — sending the
+  // bot's own LONG/SHORT here silently matches nothing, which is why every
+  // caller passes only {symbol, positionId} and filters client-side.
   getPendingTpSlOrders({ symbol, positionId, side, positionMode, skip = 0, limit = 50 } = {}) {
     return this._get('/api/v1/futures/tpsl/get_pending_orders',
       { symbol, positionId, side, positionMode, skip, limit });

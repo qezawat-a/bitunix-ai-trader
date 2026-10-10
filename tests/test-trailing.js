@@ -10,6 +10,16 @@
  */
 
 import { trailingStop } from '../src/trading/risk.js';
+import { setSetting } from '../src/db/index.js';
+
+// Hermetic pin: trailingStop() reads live settings(), so without this the
+// suite inherits the operator's .env (BREAKEVEN_THRESHOLD=10,
+// TRAILING_TRIGGER_ROI_PCT=15, TRAILING_DISTANCE_ATR=1.0) and every
+// threshold/distance assertion below fails. These are the code defaults the
+// assertions are written against — not a change to production tuning.
+await setSetting('breakeven_threshold', 20, 'test');
+await setSetting('trailing_trigger_roi_pct', 25, 'test');
+await setSetting('trailing_distance_atr', 0.5, 'test');
 
 let passed = 0, failed = 0;
 const assert = (c, m) => { c ? (passed++, console.log(`  ok  ${m}`)) : (failed++, console.log(`  FAIL ${m}`)); };

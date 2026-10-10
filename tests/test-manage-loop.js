@@ -27,6 +27,27 @@ import { manageOpenPositions, positionRoi, resetGuardState } from '../src/tradin
 import { resetSymbolConfigCache, resetStopMemory } from '../src/trading/executor.js';
 import { resetKlineCache } from '../src/scanner/scanner.js';
 import { trailingStop } from '../src/trading/risk.js';
+import { resetTrailing } from '../src/trading/tpsl.js';
+import { setSetting } from '../src/db/index.js';
+
+// Hermetic pin: manageOpenPositions() reads live settings(), so without this
+// the suite inherits the operator's .env and asserts against the wrong
+// numbers. Every value below equals the code default in config.js — this
+// changes what the TEST sees, not production tuning:
+//   account_tp/sl 1.33/0.33 -> 0/0 (off): otherwise the account-level branch
+//     returns early and every breakeven/trailing scenario below sees zero
+//     actions — the suite would test the flatten path, not the guard loop.
+//   breakeven 10 / trigger 15 / distance 1.0 -> 20 / 25 / 0.5: the
+//     threshold, reason-string and stop-distance assertions are written
+//     against the defaults.
+//   trailing_method RATIO -> ATR: the RATIO branch arms at an activation
+//     price the synthetic candles never reach, so no trail ever forms.
+await setSetting('account_tp_usdt', 0, 'test');
+await setSetting('account_sl_usdt', 0, 'test');
+await setSetting('breakeven_threshold', 20, 'test');
+await setSetting('trailing_trigger_roi_pct', 25, 'test');
+await setSetting('trailing_distance_atr', 0.5, 'test');
+await setSetting('trailing_method', 'ATR', 'test');
 
 let passed = 0, failed = 0;
 const assert = (c, m) => { c ? (passed++, console.log(`  ok  ${m}`)) : (failed++, console.log(`  FAIL ${m}`)); };
@@ -50,12 +71,15 @@ const setCentre = (px) => { centre = px; };
 /**
  * Wipe every piece of cross-scenario state, so each scenario below starts clean.
  *
- * There are THREE independent stores that survive a pass, and a suite that only
- * clears one of them will produce confident nonsense:
+ * There are FOUR independent stores that survive a pass, and a suite that only
+ * clears some of them will produce confident nonsense:
  *
  *   1. manager.js   lastStop / seenPositions — the loop's own ratchet
  *   2. executor.js  bestStop — a SECOND ratchet, enforced inside upsertPositionTpSl
  *   3. scanner.js   klineCache — 10s TTL, so "price fell" reads the old price
+ *   4. tpsl.js      trailState — RATIO/INTERVAL activation memory, keyed by
+ *                   positionId; every scenario here reuses '9001', so one
+ *                   armed run leaks its extreme into the next scenario
  *
  * Finding #2 is what made this suite lie. A scenario that trailed a stop to
  * 10008 left bestStop holding it; the next scenario's rescue stop wanted 9860,
@@ -64,7 +88,7 @@ const setCentre = (px) => { centre = px; };
  * producing a stop ABOVE entry on a flat position — a serious bug. It was not:
  * it was this suite failing to isolate itself.
  */
-const reset = () => { resetGuardState(); resetStopMemory(); resetKlineCache(); };
+const reset = () => { resetGuardState(); resetStopMemory(); resetKlineCache(); resetTrailing(); };
 
 /**
  * A position exactly as the exchange reports it, in CROSS margin mode.
