@@ -2,7 +2,7 @@ import bitunix from '../exchange/bitunix.js';
 import { createLogger } from '../logger.js';
 import { orderGotFill, orderRejected } from '../exchange/errors.js';
 import { computeDynamicTpSl, computeMargin } from './risk.js';
-import { applyPartialTpSl, entryMethod } from './tpsl.js';
+import { applyPartialTpSl, entryMethod, mostProtectiveStopRow } from './tpsl.js';
 import {
   settings, openTrade, attachPositionId, logEvent, setCooldown, remember,
 } from '../db/index.js';
@@ -438,14 +438,11 @@ export async function readPositionTpSl({ symbol, positionId, side = null }) {
   );
   const pool = forPos.length ? forPos : list;
   const withStop = pool.filter((r) => r && r.slPrice != null);
-  // the whole-position row is the one with no partial quantity on it
   // With several rows (order-attached SL + position SL + rungs) the stop that
   // actually protects is the MOST protective one, not whichever came first.
-  const pick = (a, b) => (side === 'LONG'
-    ? (Number(a.slPrice) >= Number(b.slPrice) ? a : b)
-    : (Number(a.slPrice) <= Number(b.slPrice) ? a : b));
-  const row = side && withStop.length
-    ? withStop.reduce(pick)
+  // Without a side we cannot rank them, so fall back to the whole-position row.
+  const row = side
+    ? mostProtectiveStopRow(withStop, side)
     : (withStop.find((r) => r.tpQty == null && r.slQty == null) || withStop[0] || null);
   if (!row) return null;
 

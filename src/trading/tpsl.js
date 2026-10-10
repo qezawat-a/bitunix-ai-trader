@@ -38,6 +38,40 @@ const log = createLogger('tpsl');
  */
 
 // ---------------------------------------------------------------------------
+// SHARED: reading the stop back off the exchange
+// ---------------------------------------------------------------------------
+
+/**
+ * The row carrying the stop that ACTUALLY protects the position.
+ *
+ * A position can show several pending tp/sl rows at once — the order-attached
+ * stop from placeOrder(slPrice=...), the position-level stop, and any partial
+ * rungs. They do not agree on the stop price, and they can disagree about which
+ * is live. Picking "whichever came first" leaves the original wide stop in
+ * charge, so the ratchet in the manager sees no improvement and the position
+ * keeps a stop nobody wants.
+ *
+ * The stop that protects is the MOST protective one for the side: the highest
+ * for a LONG (closest to price from below), the lowest for a SHORT. Ties keep
+ * the earlier row so the result is stable.
+ *
+ * Returns null when no row carries a stop.
+ */
+export function mostProtectiveStopRow(rows, side) {
+  const withStop = (rows || []).filter((r) => r && r.slPrice != null);
+  if (!withStop.length) return null;
+  const isLong = side === 'LONG';
+  return withStop.reduce((best, r) => {
+    if (best == null) return r;
+    const b = Number(best.slPrice);
+    const c = Number(r.slPrice);
+    if (!Number.isFinite(b)) return r;
+    if (!Number.isFinite(c)) return best;
+    return (isLong ? c > b : c < b) ? r : best;
+  }, null);
+}
+
+// ---------------------------------------------------------------------------
 // 1. POSITION TP/SL — native, whole position
 // ---------------------------------------------------------------------------
 

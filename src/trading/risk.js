@@ -234,8 +234,6 @@ export function adaptiveTarget({
  *   policy: size off a STRUCTURE timeframe, not the execution one; walk the
  *           configured list to the first TF with a valid ATR; fall back to
  *           signal.atr when nothing is valid.
- *
- * The pick below is the human's design task (see the TODO marker in the body).
  */
 export function stopAtrFor(signal, s) {
   // Size off the first STRUCTURE timeframe: the first configured TF AFTER the

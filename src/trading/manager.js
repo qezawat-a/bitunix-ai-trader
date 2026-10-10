@@ -4,6 +4,7 @@ import { createLogger } from '../logger.js';
 import { trailingStop, computeDynamicTpSl, stopAtrFor } from './risk.js';
 import {
   trailingStep, resetTrailing, trailingSnapshot, evaluateAccountTpSl, closeEverything,
+  mostProtectiveStopRow,
 } from './tpsl.js';
 import { upsertPositionTpSl, closePosition, forgetStop } from './executor.js';
 import { getCandles } from '../scanner/scanner.js';
@@ -307,10 +308,7 @@ export async function manageOpenPositions({ notify = null } = {}) {
         // empty action list on every pass while the position kept the original
         // wide stop. The exchange is the source of truth; lastStop is only a
         // fallback for when the read is unavailable.
-        const exchangeRow = (tpsl || []).filter((r) => r && r.slPrice != null)
-          .reduce((a, b) => (!a ? b : (p.side === 'LONG'
-            ? (Number(b.slPrice) > Number(a.slPrice) ? b : a)
-            : (Number(b.slPrice) < Number(a.slPrice) ? b : a))), null);
+        const exchangeRow = mostProtectiveStopRow(tpsl, p.side);
         const exchangeStop = exchangeRow ? Number(exchangeRow.slPrice) : null;
         const baseline = exchangeStop != null && Number.isFinite(exchangeStop)
           ? exchangeStop

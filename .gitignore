@@ -6,3 +6,9 @@ npm-debug.log*
 .DS_Store
 push.sh
 mcp.json
+
+# patch/backup leftovers — build artifacts, never source
+*.bak
+*.orig
+*.rej
+*.patch
