@@ -49,9 +49,9 @@ export function mmrFor(maxLeverage) {
  *   Short : Liq = Entry x (1 + 1/Lev - MMR)
  *
  * Verified against the doc's worked example: entry 100000, 100x, MMR 0.5%
- * -> 100000 x (1 - 0.01 + 0.005) = 99500. The doc prints 99505 because it
- * carries the margin term through unrounded; the 5 USDT difference is 0.005%
- * and lands on the conservative side.
+ * -> 100000 x (1 - 0.01 + 0.005) = 99500. This simplified form is
+ * algebraically identical to the doc's full expression, in which the Margin
+ * terms cancel exactly: (Margin - Margin*Lev*MMR)/(Margin*Lev) = 1/Lev - MMR.
  *
  * CROSS margin liquidates later than this, because the whole account balance
  * backs the position. Using the isolated formula for both modes therefore

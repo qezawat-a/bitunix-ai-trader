@@ -31,7 +31,9 @@ export async function ensureSymbolConfig(symbol, overrideLev = null) {
       positionModeApplied = wantPosMode;
       log.info(`position mode -> ${wantPosMode}`);
     } catch (e) {
-      // 30005 / 20009: cannot change with open positions — read actual mode instead
+      // 20009: "Position exists, so positions mode cannot be updated" — cannot
+      // change position mode with an open position; read the actual mode instead.
+      // (20006 is the leverage/margin-mode equivalent; 30005 is unrelated.)
       try {
         const acc = await bitunix.getAccount();
         const actual = Array.isArray(acc) ? acc[0]?.positionMode : acc?.positionMode;
@@ -565,8 +567,10 @@ export async function upsertPositionTpSl({ symbol, positionId, tpPrice, slPrice,
     const qty = row.slQty ?? row.tpQty ?? await positionQtyOf(symbol, positionId);
     if (id != null && qty != null) {
       try {
+        // modify_tp_sl_order documents ONLY orderId + the tp/sl fields — no
+        // symbol, no positionId. Key the modify on orderId alone, per the doc.
         const mbody = {
-          orderId: String(id), symbol, positionId: String(positionId),
+          orderId: String(id),
           slPrice: body.slPrice, slStopType: 'MARK_PRICE', slOrderType: 'MARKET', slQty: String(qty),
         };
         const keepTp = body.tpPrice ?? row.tpPrice;

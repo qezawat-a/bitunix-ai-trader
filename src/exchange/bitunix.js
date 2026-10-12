@@ -71,7 +71,11 @@ export class BitunixClient {
     try {
       json = JSON.parse(text);
     } catch {
-      throw new BitunixError(40001, `non-JSON response (HTTP ${res.status}): ${text.slice(0, 200)}`, { path });
+      // A non-JSON body is a transport/gateway fault, i.e. the TRANSIENT
+      // network case — tag it 10001 so the retry path in _request fires.
+      // (40001 is the documented copy-trading precondition, not an internal
+      // error, and is not retryable.)
+      throw new BitunixError(10001, `non-JSON response (HTTP ${res.status}): ${text.slice(0, 200)}`, { path });
     }
 
     const code = Number(json.code);
@@ -105,13 +109,14 @@ export class BitunixClient {
   // NOTE: the public docs omit 3m, but the endpoint serves it — verified live
   // (bars exactly 180s apart, a distinct series from 5m). An unsupported
   // interval returns code 0 with an EMPTY data array, never an error.
-  // The official SDK's KlineRequest names this field klineType (LAST_PRICE |
-  // MARK_PRICE), not type. Probing shows the endpoint currently ignores both
-  // spellings — the same series comes back either way — but send the name the
-  // SDK uses so this keeps working if they wire it up.
-  getKline({ symbol, interval, limit = 200, startTime, endTime, klineType }) {
+  // The LAST_PRICE/MARK_PRICE selector is named `type` per get_kline.html and
+  // the official Node demo (openApiHttpFuturePublic.js sends `type`). An
+  // unknown query key is silently ignored and the endpoint falls back to its
+  // documented default (LAST_PRICE), so sending the wrong name would quietly
+  // return the last-price series with no error — send the documented `type`.
+  getKline({ symbol, interval, limit = 200, startTime, endTime, type }) {
     return this._get('/api/v1/futures/market/kline',
-      { symbol, interval, limit, startTime, endTime, klineType }, false);
+      { symbol, interval, limit, startTime, endTime, type }, false);
   }
 
   // GET /api/v1/futures/market/trading_pairs

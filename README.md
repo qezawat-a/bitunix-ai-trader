@@ -621,10 +621,15 @@ Checked against github.com/qezawat-a/open-api (Java, Node, Python, Go, PHP).
 Parameter-level audit against the SDK request classes found four real gaps,
 all now closed: `marginCoin` was not sent on the trade endpoints (the SDK
 sends it on place_order, cancel_orders, cancel_all_orders,
-flash_close_position and the three history/pending queries); the kline
-type parameter was named `type` where `KlineRequest` calls it `klineType`
-(the endpoint ignores both today, but the name now matches); order status was
+flash_close_position and the three history/pending queries); order status was
 never checked after placing; and `PART_FILLED_CANCELED` was unhandled.
+
+The kline LAST_PRICE/MARK_PRICE selector is sent as `type` — the name both
+`get_kline.html` and the Node demo use. An earlier revision sent `klineType`
+on the (incorrect) theory that the Java SDK's field name governed the wire;
+an unknown query key is silently dropped and the endpoint falls back to its
+documented LAST_PRICE default, so that spelling would have quietly returned
+the last-price series with no error. `type` is what the endpoint documents.
 
 That last one matters most. A market order can come back CANCELED (price
 protection, thin book, margin recheck) or PART_FILLED_CANCELED — a real

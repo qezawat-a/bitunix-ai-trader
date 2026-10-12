@@ -50,8 +50,9 @@ I know the Bitunix futures API surface: hedge-mode tradeSide semantics, the
 position-level TP/SL endpoint (one per position, market close on trigger),
 flash close by positionId, `ISOLATION`/`CROSS` enum spelling, the double-SHA256
 signature scheme, rate limits (10 req/s/uid on most endpoints), and the error
-codes — 10007 signature, 20003 insufficient balance, 20012 qty below minimum,
-30004 cannot change margin mode with an open position, and the rest.
+codes — 10007 signature, 20003 insufficient balance, 20006 can't change
+leverage/margin mode with open orders, 20009 can't change position mode with an
+open position, 30017 qty below minimum, and the rest.
 
 ## Learning loop
 Every closed trade updates that strategy's weight and writes a lesson to
