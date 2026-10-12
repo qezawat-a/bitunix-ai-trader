@@ -224,10 +224,62 @@ export const SUPPORTED_TIMEFRAMES = Object.keys(TF_MINUTES);
 export function timeframeMinutes(tf) { return TF_MINUTES[tf] || null; }
 
 /**
+ * Rank a candidate pool into the pick order for the given universe_rank mode.
+ *
+ * Pure and network-free so it can be unit-tested directly. Each item is
+ * { symbol, qv, range, price, chg }.
+ *
+ *   VOLUME   deepest books first; 24h movement only as a tie-breaker. The
+ *            score is liquidity-dominated (0.75) so a thin coin with a huge
+ *            range can never outrank BTC. Liquidity dominates; volatility is a
+ *            tie-breaker, not a multiplier that can lift an illiquid coin.
+ *
+ *            (Previously log10(volume) * (1 + range*4), which compressed a
+ *            2000x volume gap into 1.5x of score and let a 70% daily range
+ *            erase it — BTC ranked 64th behind coins doing $600k. That is how
+ *            you end up long a microcap with 10x leverage.)
+ *
+ *   GAINERS  ONLY coins that are actually UP on the day (chg > 0), biggest
+ *            gain first. A coin that is flat or red is not a gainer and is
+ *            dropped, even if the pool is smaller than universe_size — that
+ *            ceiling must never pull losers into a gainers scan.
+ *   LOSERS   the mirror: only chg < 0, biggest fall first.
+ *   MOVERS   biggest move in EITHER direction (|chg| first), up or down.
+ *
+ * min_24h_volume_usd has already been applied by the caller; it matters MORE
+ * in the change-ranked modes, because the biggest movers on an exchange are
+ * usually the thinnest books — exactly where a stop gets swept.
+ */
+export function rankUniverse(pool, mode = 'VOLUME') {
+  const m = String(mode || 'VOLUME').toUpperCase();
+
+  if (m === 'GAINERS') {
+    return pool.filter((x) => x.chg > 0).sort((a, b) => b.chg - a.chg);
+  }
+  if (m === 'LOSERS') {
+    return pool.filter((x) => x.chg < 0).sort((a, b) => a.chg - b.chg);
+  }
+  if (m === 'MOVERS') {
+    return [...pool].sort((a, b) => Math.abs(b.chg) - Math.abs(a.chg));
+  }
+
+  // VOLUME (default)
+  const maxVol = Math.max(...pool.map((x) => x.qv), 0);
+  return pool
+    .map((x) => {
+      const liquidity = maxVol ? x.qv / maxVol : 0;        // 0..1, linear
+      const movement = Math.min(x.range, 0.25) / 0.25;     // 0..1, capped at 25%
+      return { ...x, score: liquidity * 0.75 + movement * 0.25 };
+    })
+    .sort((a, b) => b.score - a.score);
+}
+
+/**
  * Build the trading universe.
  * settings.symbols === 'AUTO'  -> pull EVERY tradable pair from the exchange
  *                                 (get_trading_pairs + get_tickers) and rank by
- *                                 24h quote volume * |range|, keep universe_size.
+ *                                 universe_rank (VOLUME | GAINERS | LOSERS |
+ *                                 MOVERS), keep universe_size.
  * otherwise                    -> honour the explicit comma-separated list.
  */
 export async function buildUniverse() {
@@ -295,23 +347,21 @@ export async function buildUniverse() {
   // thinnest books, which is exactly where a stop gets swept. The floor is the
   // only thing keeping those out.
   const mode = String(s.universe_rank || 'VOLUME').toUpperCase();
-  const maxVol = Math.max(...pool.map((x) => x.qv));
 
-  let scored;
-  if (mode === 'GAINERS') {
-    scored = [...pool].sort((a, b) => b.chg - a.chg);
-  } else if (mode === 'LOSERS') {
-    scored = [...pool].sort((a, b) => a.chg - b.chg);
-  } else if (mode === 'MOVERS') {
-    scored = [...pool].sort((a, b) => Math.abs(b.chg) - Math.abs(a.chg));
-  } else {
-    scored = pool
-      .map((x) => {
-        const liquidity = x.qv / maxVol;                  // 0..1, linear
-        const movement = Math.min(x.range, 0.25) / 0.25;  // 0..1, capped at 25%
-        return { ...x, score: liquidity * 0.75 + movement * 0.25 };
-      })
-      .sort((a, b) => b.score - a.score);
+  // A change-ranked universe must actually BE gainers/losers. universe_size is
+  // a ceiling, not a quota: when the volume floor leaves fewer liquid names
+  // than universe_size, scanning all of them is correct for VOLUME — but in
+  // GAINERS mode the old code silently swept in every coin that was FLAT or
+  // DOWN on the day (measured: a $20M floor left 19 pairs, 10 of them red),
+  // which is exactly the "I set GAINERS but it isn't scanning gainers" report.
+  // rankUniverse now drops non-qualifying names, so a green day yields only
+  // real gainers. On an all-red (or all-green) day nothing qualifies — fall
+  // back to the VOLUME ranking so the scanner keeps working instead of
+  // erroring with an empty universe every cycle.
+  let scored = rankUniverse(pool, mode);
+  if (!scored.length && (mode === 'GAINERS' || mode === 'LOSERS')) {
+    log.warn(`universe_rank=${mode}: no liquid pair is ${mode === 'GAINERS' ? 'up' : 'down'} today — falling back to VOLUME ranking`);
+    scored = rankUniverse(pool, 'VOLUME');
   }
 
   const size = Number(s.universe_size || 40);
