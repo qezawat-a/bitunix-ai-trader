@@ -492,23 +492,34 @@ export async function consensus(analysis) {
 export async function scan({ onlySymbols = null, persist = true } = {}) {
   const s = settings();
   const universe = onlySymbols || await buildUniverse();
+  if (!universe.length) {
+    throw new Error(`No tradable symbols matched ${onlySymbols ? onlySymbols.join(',') || '(empty list)' : s.symbols}. Check symbols and exchange pair status.`);
+  }
   const minAgree = Number(s.min_agreement || 2);
   const minConf = Number(s.min_confidence || 80);
   const confirmScans = Number(s.signal_confirm_scans || 1);
   const cooldown = Number(s.cooldown_min || 5);
 
   const out = [];
+  const errors = [];
   const CONCURRENCY = 4;
 
   for (let i = 0; i < universe.length; i += CONCURRENCY) {
     const chunk = universe.slice(i, i + CONCURRENCY);
     const analyses = await Promise.all(chunk.map(async (sym) => {
       try { return await analyseSymbol(sym); }
-      catch (e) { log.debug(`${sym}: ${e.message}`); return null; }
+      catch (e) { return { symbol: sym, error: e.message }; }
     }));
 
     for (const a of analyses) {
-      if (!a) continue;
+      const usable = Object.values(a.timeframes || {}).some((tf) => !tf.error);
+      if (a.error || !usable) {
+        const detail = a.error || Object.entries(a.timeframes || {})
+          .map(([tf, result]) => `${tf}: ${result.error}`).join('; ') || 'no candle data';
+        errors.push(`${a.symbol}: ${detail}`);
+        log.warn(`scan data unavailable — ${a.symbol}: ${detail}`);
+        continue;
+      }
       const sig = await consensus(a);
       if (!sig) continue;
 
@@ -540,6 +551,11 @@ export async function scan({ onlySymbols = null, persist = true } = {}) {
     }
   }
 
+  // A failed data read is not a successful scan with no market opportunities.
+  // Let the orchestrator's status and retry loop surface the actual failure.
+  if (errors.length === universe.length) {
+    throw new Error(`Scan failed for all ${universe.length} symbols: ${errors.slice(0, 3).join(' | ')}`);
+  }
   out.sort((a, b) => (b.qualified - a.qualified)
     || (b.agreement * b.confidence) - (a.agreement * a.confidence));
   return out;

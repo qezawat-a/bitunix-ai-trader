@@ -16,7 +16,7 @@ import { availableBalance, closePosition, closeAll, resetSymbolConfigCache } fro
 import { portfolioSnapshot, livePositions, exchangePerformance } from '../trading/manager.js';
 import {
   HELP, md, mdt, bold, italic, fmtNum, usd, pct, agentText,
-  formatSignal, formatPositions, formatBalance, formatSettings,
+  formatSignal, formatPositions, formatBalance, formatSettings, formatScanStatus,
   SETTING_INFO, SETTING_SECTIONS,
 } from './format.js';
 
@@ -107,13 +107,14 @@ export function createCommandHandler(ctx) {
 
       // 3. loops
       L.push('', bold('Loops'));
+      L.push(formatScanStatus(orchestrator.scanStatus()));
       const f = orchestrator?.failures || {};
       for (const name of ['scan', 'manage', 'report', 'autonomous', 'dream']) {
         const st = f[name];
         if (!st) { L.push(mdt`· ${name}: not started`); continue; }
         L.push(st.count
           ? mdt`❌ ${name}: failing ${st.count}x — ${st.lastError || 'unknown'}`
-          : mdt`✅ ${name}: healthy`);
+          : mdt`· ${name}: no consecutive failures recorded`);
       }
       const st = orchestrator?.stats || {};
       L.push('', mdt`scans ${st.scans ?? 0} · signals ${st.signals ?? 0} · trades ${st.trades ?? 0} · errors ${st.errors ?? 0}`);
@@ -121,7 +122,8 @@ export function createCommandHandler(ctx) {
       // 4. why the report loop may be quiet
       L.push('', bold('Report loop'));
       if (orchestrator?._unreadable) L.push(mdt`⚠️ paused: ${orchestrator._unreadable}`);
-      else L.push(italic('Reports send when there are positions or signals; otherwise a heartbeat every heartbeat_minutes.'));
+      else if (!orchestrator.reportsEnabled) L.push(italic('Periodic reports are OFF. Use /report on to enable them.'));
+      else L.push(mdt`Reports every ${db.settings().report_interval_sec}s, including quiet scans and rejected signals.`);
 
       await reply(chatId, L.join('\n'));
     },
@@ -139,6 +141,8 @@ export function createCommandHandler(ctx) {
         bold('Agent'),
         mdt`  auto trade ${s.auto_trade ? 'ON' : 'OFF'}  ·  thinking ${s.thinking_level}  ·  autocompact ${s.autocompact}`,
         mdt`  loops: scan ${s.scan_interval_sec}s · manage+guard ${Math.min(s.manage_interval_sec, s.guard_interval_sec)}s · report ${s.report_interval_sec}s · autonomous ${s.agent_autonomous_sec}s · dream ${s.dream_enabled ? s.dream_interval_hours + 'h' : 'off'}`,
+        formatScanStatus(orchestrator.scanStatus()),
+        mdt`  report destinations: ${orchestrator.chatIds.length}${orchestrator.chatIds.map(String).includes(String(chatId)) ? ' (includes this chat)' : ' (this chat is not a push target)'}`,
         '',
         bold('Models'),
         ...ai.status().map((p) => mdt`  ${p.provider}: ${p.model}`),
@@ -759,7 +763,7 @@ export function createCommandHandler(ctx) {
       if (!['on', 'off'].includes(v)) {
         const every = Math.max(10, Number(db.settings().report_interval_sec));
         return reply(chatId, [
-          mdt`Reports: ${orchestrator.running ? 'ON' : 'stopped'} · every ${every}s`,
+          mdt`Reports: ${!orchestrator.running ? 'stopped' : orchestrator.reportsEnabled ? 'ON' : 'OFF'} · every ${every}s`,
           mdt`Usage: /report off — stops the periodic push.`,
           italic('Scanning, trading and position management are unaffected.'),
         ].join('\n'));
@@ -775,7 +779,8 @@ export function createCommandHandler(ctx) {
       const v = (args[0] || '').toLowerCase();
       if (!['on', 'off'].includes(v)) {
         return reply(chatId, [
-          mdt`Scanner: ${orchestrator.scanningEnabled ? 'ON' : 'OFF'} · every ${db.settings().scan_interval_sec}s`,
+          formatScanStatus(orchestrator.scanStatus()),
+          mdt`Scan interval: ${db.settings().scan_interval_sec}s after each cycle finishes`,
           mdt`Usage: /scan off — stops scanning. Existing positions keep being managed.`,
           italic('Separate from /auto_trade: with the scanner off I stop looking for entries but still guard what is open.'),
         ].join('\n'));

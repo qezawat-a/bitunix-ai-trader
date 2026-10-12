@@ -221,7 +221,7 @@ export const SETTING_INFO = {
   trailing_callback:        ['The retrace that closes the position, once trailing is armed. A percentage of the best price when trailing_method is RATIO, an absolute price distance when INTERVAL. Ignored for ATR.', 'e.g. 1.5'],
   account_tp_usdt:          ['Close EVERY position once total unrealised profit reaches this many USDT. 0 disables it.', 'USDT, 0 = off'],
   account_sl_usdt:          ['Close EVERY position once total unrealised loss reaches this many USDT (enter it positive). 0 disables it.', 'USDT, 0 = off'],
-  heartbeat_minutes:        ['When there are no positions and no signals, how often to send a one-line "still alive" ping instead of staying completely silent.', 'minutes, e.g. 15'],
+  heartbeat_minutes:        ['How often to repeat an ongoing account-read failure. Normal reports use report_interval_sec, including quiet scans.', 'minutes, e.g. 15'],
   universe_rank:            ['How the pairs that clear the liquidity floor are ordered. VOLUME = deepest books first. GAINERS = biggest 24h rise first. LOSERS = biggest 24h fall. MOVERS = biggest move either way.', 'VOLUME | GAINERS | LOSERS | MOVERS'],
   min_24h_volume_usd:       ['Liquidity floor. Pairs thinner than this are never scanned — a stop can be swept on an illiquid book.', 'USD, e.g. 20000000'],
   timeframes:               ['Timeframes analysed. The shortest is the execution timeframe; the others confirm.', '1m 3m 5m 15m 30m 1h 2h 4h 6h 8h 12h 1d 3d 1w 1M'],
@@ -327,6 +327,20 @@ export function formatSettings(s, section = null) {
   return out.join('\n');
 }
 
+/** Live scanner state, shared by reports and commands (not inferred from auto_trade). */
+export function formatScanStatus(s) {
+  const scanner = !s.running ? 'stopped' : s.scanningEnabled ? 'ON' : 'OFF';
+  const reports = !s.running ? 'stopped' : s.reportsEnabled ? 'ON' : 'OFF';
+  const age = (at) => `${Math.max(0, Math.floor((Date.now() - at) / 1000))}s ago`;
+  const lines = [
+    mdt`Scanner: ${scanner} · reports: ${reports} · scope: ${s.symbols}`,
+    mdt`Completed scans: ${s.scans} · last completed: ${s.lastScanAt == null ? 'not yet' : age(s.lastScanAt)}`,
+  ];
+  if (s.busy) lines.push(mdt`Scan cycle in progress${s.lastScanStartedAt == null ? '' : ` · started ${age(s.lastScanStartedAt)}`} (includes AI judgement/execution)`);
+  if (s.error) lines.push(mdt`Last scan-cycle error: ${s.error}`);
+  return lines.join('\n');
+}
+
 export function formatReport({ snapshot, signals, balance, stats }) {
   const lines = [bold('📊 Report'), ''];
   lines.push(mdt`balance ${Number(balance.available).toFixed(2)} USDT  ·  positions ${snapshot.count}  ·  uPnL ${usd(snapshot.totalPnl)}`);
@@ -342,13 +356,13 @@ export function formatReport({ snapshot, signals, balance, stats }) {
   const qualified = (signals || []).filter((s) => s.qualified);
   const watch = (signals || []).filter((s) => !s.qualified).slice(0, 4);
   if (qualified.length) {
-    lines.push('', bold('Signals'));
+    lines.push('', bold('Signals — last completed scan'));
     for (const s of qualified) {
       lines.push(mdt`${s.side === 'LONG' ? '🟩' : '🟥'} ${s.symbol} ${s.side} ${s.confidence}% (${s.agreement}/${STRATEGY_COUNT}) ${s.regime}`);
     }
   }
   if (watch.length) {
-    lines.push('', bold('Watchlist'));
+    lines.push('', bold('Watchlist — last completed scan'));
     for (const s of watch) {
       lines.push(mdt`· ${s.symbol} ${s.side} ${s.confidence}% — ${s.rejectReason}`);
     }
@@ -395,7 +409,7 @@ export const HELP = [
   '/liq\\_distance [0.05\u20130.9] — how much of the distance to liquidation the stop may use',
   '/breakeven [ROI%] — ROI at which the stop moves to entry',
   '/trailing [ROI%] — ROI at which the stop starts following price',
-  '/scan\\_interval [s] · /guard\\_interval [s] · /report [s]',
+  '/scan\\_interval [s] · /guard\\_interval [s] · /set report\\_interval\\_sec [s]',
   '/thinking off\\|low\\|medium\\|high',
   '',
   bold('Memory and sessions'),

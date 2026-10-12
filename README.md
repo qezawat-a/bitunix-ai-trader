@@ -185,7 +185,7 @@ is open. `/settings` shows the result.
 | `/close SYMBOL\|id` `/closeall` | Execution |
 | `/auto_trade on\|off` | Master switch for opening new positions. Off still scans, reports and manages what is open |
 | `/scan on\|off` | The scanner only. Separate from `/auto_trade`: with the scanner off, no new signals, but open positions stay fully managed and guarded |
-| `/report on\|off` | The periodic Telegram push. Everything else keeps running |
+| `/report on\|off` | The periodic Telegram push at `report_interval_sec`, including quiet scans and rejection reasons. Everything else keeps running |
 | `/leverage [N]` | Show or set leverage. Asks for confirmation while a position is open |
 | `/symbol [SYM,SYM]` | The trading universe, or `AUTO` to rank the whole exchange by volume × range |
 | `/settings` | Every trade setting at a glance |

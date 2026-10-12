@@ -6,7 +6,7 @@ import ai from './ai/providers.js';
 import { scan } from './scanner/scanner.js';
 import { openFromSignal, reverse, availableBalance } from './trading/executor.js';
 import { manageOpenPositions, checkReversal, portfolioSnapshot } from './trading/manager.js';
-import { formatSignal, formatFill, formatReport, agentText, mdt, italic } from './telegram/format.js';
+import { formatSignal, formatFill, formatReport, formatScanStatus, agentText, mdt, italic } from './telegram/format.js';
 import { STRATEGY_COUNT } from './strategies/index.js';
 import { dream as dreamCycle, formatDream } from './ai/dream.js';
 
@@ -38,6 +38,9 @@ export class Orchestrator {
     this.scanningEnabled = true;
     this.reportsEnabled = true;
     this.lastSignals = [];
+    this.lastScanStartedAt = null;
+    this.lastScanAt = null;
+    this.lastScanError = null;
     this.inFlight = new Set();
     this.stats = { scans: 0, signals: 0, trades: 0, reversals: 0, errors: 0, startedAt: Date.now() };
   }
@@ -119,13 +122,36 @@ export class Orchestrator {
 
   rescheduleLoops() { log.info('intervals reloaded'); }
 
+  scanStatus() {
+    return {
+      running: this.running,
+      scanningEnabled: this.scanningEnabled,
+      reportsEnabled: this.reportsEnabled,
+      symbols: db.settings().symbols,
+      scans: this.stats.scans,
+      lastScanAt: this.lastScanAt,
+      lastScanStartedAt: this.lastScanStartedAt,
+      busy: this.inFlight.has('scan'),
+      error: this.lastScanError || this.failures?.scan?.lastError,
+    };
+  }
+
   // ----------------------------------------------------------------- loops
 
   async scanLoop() {
     if (!this.scanningEnabled) return;
     const s = db.settings();
-    const signals = await scan();
+    this.lastScanStartedAt = Date.now();
+    let signals;
+    try {
+      signals = await scan();
+    } catch (e) {
+      this.lastScanError = e.message;
+      throw e;
+    }
     this.lastSignals = signals;
+    this.lastScanAt = Date.now();
+    this.lastScanError = null;
     this.stats.scans++;
 
     const qualified = signals.filter((x) => x.qualified);
@@ -299,23 +325,14 @@ export class Orchestrator {
       this._unreadableAt = 0;
       await this.notify(mdt`✅ Account readable again — reporting resumed.`);
     }
-    // Stay quiet when there is genuinely nothing to say — but not SILENT.
-    // With no positions and no qualified signals this returned nothing at all,
-    // so an idle bot and a dead bot looked exactly the same from Telegram.
-    // Send a compact heartbeat instead, throttled so it cannot become noise.
+    // /report on promises the configured cadence, including quiet scans and
+    // rejected candidates. The old idle heartbeat hid the watchlist for up to
+    // 15 minutes, making a working scanner look stopped.
     if (quiet) return;
-    const qualified = this.lastSignals.filter((x) => x.qualified);
-    if (!snapshot.count && !qualified.length) {
-      const every = Math.max(5, Number(db.settings().heartbeat_minutes ?? 15)) * 60_000;
-      if (Date.now() - (this._lastHeartbeat || 0) < every) return;
-      this._lastHeartbeat = Date.now();
-      await this.notify(
-        mdt`💤 alive · ${this.stats.scans} scans · balance ${Number(balance.available).toFixed(2)} USDT · no positions, no signals`,
-      );
-      return;
-    }
-    this._lastHeartbeat = Date.now();
-    await this.notify(formatReport({ snapshot, signals: this.lastSignals.slice(0, 6), balance, stats }));
+    await this.notify([
+      formatReport({ snapshot, signals: this.lastSignals.slice(0, 6), balance, stats }),
+      '', formatScanStatus(this.scanStatus()),
+    ].join('\n'));
   }
 
   async autonomousLoop() {
