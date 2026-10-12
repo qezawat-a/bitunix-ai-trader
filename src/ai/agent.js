@@ -83,7 +83,11 @@ export class Agent {
   /**
    * One full agentic turn: think -> call tools -> observe -> ... -> answer.
    */
-  async run({ chatId, userMessage, subject = null, thinking = null, extraSystem = null, persist = true, onStep = null }) {
+  async run({
+    chatId, userMessage, subject = null, thinking = null, extraSystem = null,
+    persist = true, onStep = null, allowRiskChanges = true, allowEntries = true,
+    readOnly = false,
+  }) {
     const s = db.settings();
     const level = thinking || s.thinking_level || config.ai.thinkingLevel;
     const maxSteps = THINK_STEPS[String(level).toLowerCase()] ?? 6;
@@ -101,7 +105,8 @@ export class Agent {
 
     if (persist) await db.saveMessage({ chatId, role: 'user', content: userMessage }).catch(() => {});
 
-    const schemas = toolSchemas();
+    const toolPolicy = { allowRiskChanges, allowEntries, readOnly };
+    const schemas = toolSchemas(toolPolicy);
     const trace = [];
     let final = '';
 
@@ -142,7 +147,7 @@ export class Agent {
         log.info(`${danger ? '⚡' : '·'} tool ${call.name} ${JSON.stringify(call.args).slice(0, 160)}`);
         if (onStep) await onStep({ type: 'tool', name: call.name, args: call.args, danger });
 
-        const out = await runTool(call.name, call.args);
+        const out = await runTool(call.name, call.args, toolPolicy);
         trace.push({ tool: call.name, args: call.args, result: out });
 
         const serialised = JSON.stringify(out, (k, v) => (typeof v === 'bigint' ? String(v) : v)).slice(0, 12000);
@@ -197,16 +202,18 @@ SIGNAL
 WHAT I REMEMBER ABOUT ${signal.symbol}
 ${memText}
 
-You may call tools to check the book, funding history, your own recent performance, or current exposure before deciding.
+You may call read-only tools to check the book, funding history, your own recent performance, or current exposure before deciding. Do not change settings, place orders, close positions, or modify TP/SL during this judgement pass.
 
 
 The mechanical gates (min_agreement, min_confidence, cooldown) have already been passed. Your job is JUDGEMENT ONLY. Do not fabricate numeric rules (e.g. "R ≥ 2 on small balances") that do not exist in the code. If you think the trade is bad, explain using tools and market context, but never attribute it to a "gate".
+Position sizing comes from the configured margin_pct and executor limits. Do not propose a margin override.
 Then reply with ONLY a JSON object:
-{"take": true|false, "confidence": 0-100, "margin_usdt": null|number, "reasoning": "one or two sentences"}`;
+{"take": true|false, "confidence": 0-100, "reasoning": "one or two sentences"}`;
 
     const r = await this.run({
       chatId, userMessage: prompt, subject: signal.symbol,
       persist: false, thinking: s.thinking_level,
+      allowRiskChanges: false, allowEntries: false, readOnly: true,
     });
 
     const parse = (text) => {
@@ -216,7 +223,7 @@ Then reply with ONLY a JSON object:
         const v = JSON.parse(m[0]);
         return {
           take: Boolean(v.take), confidence: v.confidence,
-          marginUsdt: v.margin_usdt ?? null, reasoning: v.reasoning || '', raw: text,
+          reasoning: v.reasoning || '', raw: text,
         };
       } catch { return null; }
     };
@@ -235,6 +242,7 @@ Then reply with ONLY a JSON object:
         chatId,
         userMessage: `${prompt}\n\nDo not call any tools. Reply with the JSON object and nothing else.`,
         subject: signal.symbol, persist: false, thinking: 'low',
+        allowRiskChanges: false, allowEntries: false, readOnly: true,
       });
       verdict = parse(again.text);
       if (verdict) verdict.recovered = true;
@@ -314,8 +322,12 @@ Check with tools, do not assume:
 2. Exposure — too much risk on correlated symbols, too many positions?
 3. Anything the scanner flagged that deserves a second look.
 
+Risk settings belong to the user: do not change leverage, margin_pct, margin
+mode, or other runtime settings on this timer. Entries and reversals belong to
+the scanner/executor path; this pass may manage existing positions only.
+
 Then choose ONE:
-- You changed something (moved a stop, closed, opened, adjusted): say what you did and why, in one short paragraph.
+- You managed an existing position (moved a stop or closed): say what you did and why, in one short paragraph.
 - Something is genuinely wrong and the user must know NOW: say it in one line.
 - Anything else — including "all good", "monitoring", "nothing to do", or a
   situation you already reported: reply with exactly NOOP and nothing else.
@@ -326,6 +338,7 @@ narrate that you are checking. Silence is the correct and normal outcome.`;
     const r = await this.run({
       chatId, userMessage: prompt, persist: false,
       thinking: s.thinking_level === 'high' ? 'medium' : s.thinking_level,
+      allowRiskChanges: false, allowEntries: false,
     });
 
     const text = (r.text || '').trim();

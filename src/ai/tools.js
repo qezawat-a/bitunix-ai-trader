@@ -21,7 +21,9 @@ const bool = { type: 'boolean' };
 
 /**
  * The agent's tool belt. Each entry:
- *   { name, description, parameters (JSON schema), handler(args) -> any, danger?:true }
+ *   { name, description, parameters (JSON schema), handler(args) -> any,
+ *     danger?: true, riskChange?: true, mutatesPosition?: true,
+ *     opensPosition?: true }
  * Everything the agent can *do* to the real account lives here and nowhere else.
  */
 export const TOOLS = [
@@ -225,6 +227,8 @@ export const TOOLS = [
     name: 'open_position',
     description: 'LIVE: open a position from a signal. Dynamic ATR TP/SL is attached automatically. Size is taken from margin_pct of available balance unless margin_usdt is given.',
     danger: true,
+    mutatesPosition: true,
+    opensPosition: true,
     parameters: {
       type: 'object',
       properties: {
@@ -256,6 +260,7 @@ export const TOOLS = [
     name: 'close_position',
     description: 'LIVE: flash-close one position at market by positionId.',
     danger: true,
+    mutatesPosition: true,
     parameters: { type: 'object', properties: { positionId: str, reason: str }, required: ['positionId'] },
     handler: ({ positionId, reason }) => closePosition(positionId, reason || 'agent decision'),
   },
@@ -263,6 +268,7 @@ export const TOOLS = [
     name: 'close_all_positions',
     description: 'LIVE: close every open position (optionally only one symbol).',
     danger: true,
+    mutatesPosition: true,
     parameters: { type: 'object', properties: { symbol: str } },
     handler: ({ symbol }) => closeAll(symbol || null),
   },
@@ -270,6 +276,7 @@ export const TOOLS = [
     name: 'set_position_tpsl',
     description: 'LIVE: place or modify the position-level TP/SL (market close on trigger).',
     danger: true,
+    mutatesPosition: true,
     parameters: {
       type: 'object',
       properties: { symbol: str, positionId: str, tpPrice: num, slPrice: num },
@@ -281,6 +288,8 @@ export const TOOLS = [
     name: 'reverse_position',
     description: 'LIVE: close a position and immediately open the opposite side.',
     danger: true,
+    mutatesPosition: true,
+    opensPosition: true,
     parameters: {
       type: 'object',
       properties: { positionId: str, reasoning: str },
@@ -306,12 +315,15 @@ export const TOOLS = [
     name: 'cancel_orders',
     description: 'LIVE: cancel all resting orders (optionally for one symbol).',
     danger: true,
+    mutatesPosition: true,
     parameters: { type: 'object', properties: { symbol: str } },
     handler: ({ symbol }) => bitunix.cancelAllOrders(symbol ? { symbol } : {}),
   },
   {
     name: 'run_position_guard',
     description: 'Run one pass of the position guard now: attach missing TP/SL, move stops to breakeven, trail winners, book closed trades.',
+    danger: true,
+    mutatesPosition: true,
     parameters: { type: 'object', properties: {} },
     handler: async () => {
       const r = await manageOpenPositions();
@@ -330,6 +342,7 @@ export const TOOLS = [
     name: 'update_settings',
     description: 'Change one or more runtime settings (leverage, margin_pct, symbols, timeframes, min_confidence, intervals, reversal, thresholds...). Values are validated: invalid ones come back under "rejected" and are NOT applied.',
     danger: true,
+    riskChange: true,
     parameters: {
       type: 'object',
       properties: {
@@ -368,6 +381,7 @@ export const TOOLS = [
     name: 'set_leverage',
     description: 'LIVE: change leverage for a symbol on the exchange (and in settings if global=true).',
     danger: true,
+    riskChange: true,
     parameters: {
       type: 'object',
       properties: { symbol: str, leverage: num, global: bool },
@@ -384,6 +398,7 @@ export const TOOLS = [
     name: 'set_margin_mode',
     description: 'LIVE: change margin mode (CROSS | ISOLATION) for a symbol. Fails if that symbol has an open position or order.',
     danger: true,
+    riskChange: true,
     parameters: {
       type: 'object',
       properties: { symbol: str, marginMode: { type: 'string', enum: ['CROSS', 'ISOLATION'] }, global: bool },
@@ -480,16 +495,47 @@ export async function reloadMcpTools() {
 
 export function mcpStatus() { return mcpClient.status(); }
 
-/** Built-ins plus whatever the external servers offer. */
-export function allTools() { return [...TOOLS, ...externalTools]; }
-
-export function toolSchemas() {
-  return allTools().map(({ name, description, parameters }) => ({ name, description, parameters }));
+/**
+ * Return tools allowed in a particular agent context.
+ *
+ * User-requested Telegram turns may use the full belt. Autonomous turns may
+ * manage an existing position, but must not rewrite the account's risk policy
+ * or open an entry outside the scanner. Signal judgement is read-only and uses
+ * the stricter `readOnly` policy below.
+ */
+export function allTools(options = {}) {
+  return [...TOOLS, ...externalTools].filter((t) => !toolPolicyError(t, options));
 }
 
-export async function runTool(name, args = {}) {
+// Use the same check for discovery and dispatch: hiding a tool from a schema
+// alone does not stop a model from emitting its name from conversation memory.
+function toolPolicyError(t, { allowRiskChanges = true, allowEntries = true, readOnly = false } = {}) {
+  // External handlers have no local risk/entry classification. Keep them in
+  // user turns only, otherwise a remote trading tool bypasses these limits.
+  if (t.external && (!allowRiskChanges || !allowEntries || readOnly)) {
+    return `${t.name} is unavailable in restricted agent contexts; external tools require a user turn`;
+  }
+  if ((readOnly || !allowRiskChanges) && t.riskChange) {
+    return `${t.name} is disabled in this agent context; risk settings require an explicit user command`;
+  }
+  if (!allowEntries && t.opensPosition) {
+    return `${t.name} is disabled in this agent context; entries must pass the scanner and executor gates`;
+  }
+  if (readOnly && t.mutatesPosition) {
+    return `${t.name} is disabled during signal judgement; this pass is read-only`;
+  }
+  return null;
+}
+
+export function toolSchemas(options = {}) {
+  return allTools(options).map(({ name, description, parameters }) => ({ name, description, parameters }));
+}
+
+export async function runTool(name, args = {}, options = {}) {
   const t = TOOL_MAP[name] || externalTools.find((x) => x.name === name);
   if (!t) return { error: `unknown tool: ${name}` };
+  const policyError = toolPolicyError(t, options);
+  if (policyError) return { error: policyError };
   const started = Date.now();
   try {
     const result = await t.handler(args || {});

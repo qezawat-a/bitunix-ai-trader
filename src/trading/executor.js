@@ -125,8 +125,12 @@ export async function openFromSignal(signal, { aiVerdict = null, marginOverride 
   if (!price) return { ok: false, reason: 'no price' };
 
   const info = await bitunix.pairInfo(symbol);
+  const configuredLeverage = Number(s.leverage);
   let leverage = Math.max(Number(info?.minLeverage ?? 1),
     Math.min(Number(info?.maxLeverage ?? 125), Number(s.leverage)));
+  let leverageAdjustmentReason = leverage !== configuredLeverage
+    ? `exchange symbol leverage range is ${info?.minLeverage ?? 1}x–${info?.maxLeverage ?? 125}x`
+    : null;
 
   // ---- de-lever so the ATR stop fits inside liquidation -----------------
   // The stop distance comes from ATR and does not shrink when leverage grows,
@@ -145,6 +149,7 @@ export async function openFromSignal(signal, { aiVerdict = null, marginOverride 
       const tier = await bitunix.tierFor({ symbol, notional: marginUsdt * leverage });
       mmr = tier.mmr;
       if (tier.leverage < leverage) {
+        leverageAdjustmentReason = `risk tier L${tier.level} maximum is ${tier.leverage}x at this notional`;
         log.warn(`${symbol}: tier L${tier.level} (notional up to ${tier.endValue}) caps leverage at ${tier.leverage}x, requested ${leverage}x`);
         await logEvent('leverage_reduced', {
           symbol, requested: leverage, applied: tier.leverage,
@@ -167,6 +172,7 @@ export async function openFromSignal(signal, { aiVerdict = null, marginOverride 
       const floor = Math.max(Number(info?.minLeverage ?? 1), Number(s.min_leverage ?? 1));
       const cut = Math.max(floor, Math.min(leverage, safeLev));
       log.warn(`${symbol}: ${leverage}x would liquidate before the ${probe.slPct}% stop; using ${cut}x`);
+      leverageAdjustmentReason = `the ${probe.slPct}% ATR stop does not fit the configured liquidation buffer at ${leverage}x`;
       await logEvent('leverage_reduced', {
         symbol, requested: leverage, applied: cut, stopPct: probe.slPct, reason: 'stop beyond liquidation',
       }, symbol);
@@ -354,6 +360,9 @@ export async function openFromSignal(signal, { aiVerdict = null, marginOverride 
   return {
     ok: true, tradeId, positionId, orderId: res?.orderId, clientId,
     symbol, side: signal.side, qty: filledQty, price, leverage,
+    requestedLeverage: configuredLeverage,
+    leverageAdjusted: Number.isFinite(configuredLeverage) && leverage !== configuredLeverage,
+    leverageAdjustmentReason,
     marginUsdt: sized.cost, nominalUsdt: sized.nominal, orderUnit: unit,
     tpPrice: tpPrice == null ? null : Number(tpPrice), slPrice: Number(slPrice), risk, ladder,
   };

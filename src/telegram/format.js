@@ -153,6 +153,9 @@ export function formatFill(r) {
   return [
     `⚡ ${bold(`OPENED ${r.symbol} ${r.side}`)}`,
     mdt`entry ${fmtNum(r.price, 6)}  ·  qty ${r.qty}  ·  margin ${Number(r.marginUsdt).toFixed(2)} USDT  ·  ${r.leverage}x`,
+    r.leverageAdjusted
+      ? mdt`⚠️ leverage adjusted from ${r.requestedLeverage}x to ${r.leverage}x — ${r.leverageAdjustmentReason || 'exchange/risk limits'}`
+      : '',
     mdt`TP ${fmtNum(r.tpPrice, 6)}  ·  SL ${fmtNum(r.slPrice, 6)}  ·  ${r.risk.rr}R`,
     mdt`${r.risk.explain}`,
     r.positionId ? mdt`position ${r.positionId}` : '',

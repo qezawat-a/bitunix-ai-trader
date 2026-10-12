@@ -57,8 +57,10 @@ Neon connection and your AI keys *before* real money is at stake.
 
 Everything in `.env` is only a **seed**. The live values live in Neon
 (`agent_settings`) and are changeable at runtime from Telegram with `/set`, or
-by the agent itself. No restart needed — the loops pick up new intervals on
-their next tick.
+by the agent during an explicit user-requested turn. Autonomous checks may
+manage existing protection, but cannot rewrite leverage/margin risk settings or
+open an entry outside the scanner and executor gates. No restart needed — the
+loops pick up new intervals on their next tick.
 
 ### Environment
 

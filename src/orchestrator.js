@@ -218,7 +218,10 @@ export class Orchestrator {
         continue;
       }
 
-      const r = await openFromSignal(sig, { aiVerdict: verdict, marginOverride: verdict.marginUsdt });
+      // Sizing is mechanical: the judgement model decides whether the signal
+      // is worth taking, but it cannot silently replace margin_pct with an
+      // arbitrary per-trade amount.
+      const r = await openFromSignal(sig, { aiVerdict: verdict });
       if (r.ok) {
         this.stats.trades++; slots--;
         await this.notify(formatFill(r) + '\n' + italic(verdict.reasoning || ''));
