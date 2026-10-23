@@ -133,6 +133,7 @@ export class TelegramBot {
           { command: 'positions', description: 'Open positions' },
           { command: 'signal', description: 'Scan the market now' },
           { command: 'analyse', description: 'Deep analysis of a symbol' },
+          { command: 'deep', description: '5-phase multi-agent analysis of a symbol' },
           { command: 'pnl', description: 'Performance summary' },
           { command: 'diag', description: 'Why is it quiet? test every link' },
           { command: 'settings', description: 'All trade settings' },

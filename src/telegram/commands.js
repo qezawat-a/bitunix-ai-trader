@@ -9,6 +9,7 @@ import { createLogger } from '../logger.js';
 import { config } from '../config.js';
 import * as db from '../db/index.js';
 import { scan, analyseSymbol, consensus } from '../scanner/scanner.js';
+import { runAnalysis } from '../ai/analysis-agent.js';
 import { STRATEGY_COUNT } from '../strategies/index.js';
 import { dream as dreamCycle, formatDream, gather as gatherDream } from '../ai/dream.js';
 import { validateSetting } from '../settings-schema.js';
@@ -372,6 +373,23 @@ export function createCommandHandler(ctx) {
           userMessage: `Give me your honest read on ${symbol} right now. Consensus says ${c.side} at ${c.confidence}% with ${c.agreement}/${STRATEGY_COUNT} agreement in a ${c.regime} regime. Two short paragraphs: what the setup is, and what would make you not take it.`,
         });
         if (r.text) await reply(chatId, agentText(r.text));
+      }
+    },
+
+    async deep(chatId, args) {
+      const symbol = (args[0] || 'BTCUSDT').toUpperCase();
+      await bot.sendTyping(chatId);
+      const typing = setInterval(() => bot.sendTyping(chatId), 6000);
+      try {
+        const r = await runAnalysis(symbol);
+        clearInterval(typing);
+        const p1 = r.phase1;
+        const sigLine = mdt`Phase 1: tech ${p1.technical.signal} · news ${p1.news.signal} · fund ${p1.fundamentals.signal} · macro ${p1.macro.signal}`;
+        await reply(chatId, [bold(`🔬 Deep analysis — ${symbol}`), '', sigLine, '', agentText(r.phase5)].join('\n'));
+      } catch (e) {
+        clearInterval(typing);
+        log.error(e.stack || e.message);
+        await reply(chatId, mdt`❌ ${e.message}`);
       }
     },
 
