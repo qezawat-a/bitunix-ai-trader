@@ -669,3 +669,4 @@ indicators were reading a slightly wrong series on every symbol.
 sample above that removed 9 of 12 gaps. What survives is genuine missing
 history (an exchange outage, those bars never existed) and is reported once per
 gap shape rather than on every scan pass.
+# bitunix-ai-trader-v2
