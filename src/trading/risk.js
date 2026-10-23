@@ -562,3 +562,23 @@ export function computeMargin({ available, marginPct, openPositions, maxPosition
   if (margin > cap) margin = cap;
   return Math.max(0, margin);
 }
+
+/** Minimum position value (notional) the exchange will accept for a symbol:
+ * the minimum order quantity in base coins, rounded up to `precision` digits,
+ * multiplied by the last price. Rounded up so that, after `roundQty` floors to
+ * `precision` digits, the order still clears the exchange's minimum. */
+export function minOrderNotional({ price, minTradeVolume, precision = 4 }) {
+  const f = Math.pow(10, Number(precision) || 4);
+  const minQty = Math.ceil(Number(minTradeVolume) * f) / f;
+  return minQty * Number(price);
+}
+
+/**
+ * Margin (USDT) needed so that qty = minTradeVolume at the given leverage,
+ * assuming qty is rounded down to `precision` base coins.
+ *   qty = margin * leverage / price  =>  minMargin = minTradeVolume * price / leverage
+ */
+export function minMarginForMinOrder({ price, minTradeVolume, leverage, precision = 4 }) {
+  return minOrderNotional({ price, minTradeVolume, precision }) / Number(leverage);
+}
+

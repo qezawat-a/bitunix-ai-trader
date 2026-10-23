@@ -179,31 +179,66 @@ export async function openFromSignal(signal, { aiVerdict = null, marginOverride 
     ? `exchange holds ${leverage}x for ${symbol} (configured ${configuredLeverage}x)`
     : null;
 
-  // ---- liquidation guard ----------------------------------------------
-  // The stop is sized by ATR and does not shrink when leverage grows, but the
-  // liquidation price marches toward entry as leverage grows. Past a certain
-  // leverage the stop sits BEYOND liq and the exchange liquidates first.
-  //
-  // The fix is NOT to cut leverage. Cutting leverage shrinks the position, so a
-  // trade the scanner qualified arrives at half size — that is a loss, not a
-  // safety improvement. computeDynamicTpSl clamps the stop inside liq instead,
-  // so the position keeps its full size and the stop moves to where it can
-  // actually fire. Only a liquidation at/through the entry price is refused.
+
+  // ---- liquidation-aware sizing ---------------------------------------------
+  // The ATR stop is fixed in ATR terms and never shrinks as leverage grows,
+  // while liquidation marches toward entry as leverage grows. Past
+  // maxSafeLeverage (the highest leverage at which the stop still sits inside
+  // liquidation with the liq_distance buffer intact) the exchange closes the
+  // position before the stop can fire. Lowering leverage there is not a safety
+  // improvement - it only shrinks the position and cuts ROI. Instead:
+  //   - cap leverage at that ceiling,
+  //   - floor the margin on the exchange minimum order size,
+  //   - refuse only when the minimum order cannot be opened inside the balance
+  //     at a safe leverage.
   let realMmr = null;
-  try {
-    const tier = await bitunix.tierFor({ symbol, notional: marginUsdt * leverage });
-    realMmr = tier.mmr;
-  } catch (e) {
-    log.warn(`${symbol}: position tiers unavailable (${e.message}); using the maxLeverage estimate`);
-  }
   {
-    const probe = computeDynamicTpSl({ ...signal, price, leverage, maxLeverage: Number(info?.maxLeverage), mmr: realMmr });
-    if (probe.liqUnsafe) {
-      return { ok: false, reason: `refusing ${symbol}: at ${leverage}x liquidation sits at the entry price — lower /set leverage` };
+    try {
+      const tier = await bitunix.tierFor({ symbol, notional: marginUsdt * leverage });
+      realMmr = tier.mmr;
+    } catch (e) {
+      log.warn(symbol + ': position tiers unavailable (' + e.message + '); using the maxLeverage estimate');
     }
+    const minQty = Number(info?.minTradeVolume ?? 0);
+    const precision = Number(info?.basePrecision ?? 4);
+    const minNominal = minOrderNotional({ price, minTradeVolume: minQty, precision });
+    const available = Number(bal.available);
+
+    const probe = computeDynamicTpSl({
+      ...signal, price, leverage, maxLeverage: Number(info?.maxLeverage), mmr: realMmr,
+    });
+    if (probe.liqUnsafe) {
+      return { ok: false, reason: 'refusing ' + symbol + ': at ' + leverage + 'x liquidation sits at the entry price - lower /set leverage' };
+    }
+    const safeLev = probe.maxSafeLeverage;
+    leverage = Math.min(leverage, safeLev);
+
+    // With C = available balance, the lowest leverage that keeps the order
+    // inside the balance is levForBudget = minNominal / C. The open is safe
+    // only when levForBudget <= safeLev; otherwise the minimum order cannot be
+    // opened with the funds available, and "insufficient balance" is the wrong
+    // message - the right message names the levers the operator controls.
+    const levForBudget = minNominal > 0 ? minNominal / available : 0;
+    if (levForBudget > 0 && levForBudget > safeLev) {
+      return {
+        ok: false,
+        reason: symbol + ': minimum order ' + minQty + ' (' + minNominal.toFixed(2) + ' USDT) cannot be opened at ' + available.toFixed(2) + ' USDT balance at a safe leverage - raise margin_pct, raise leverage, or skip'
+      };
+    }
+    if (levForBudget > 0) leverage = Math.max(leverage, levForBudget);
+
+    const minMargin = minMarginForMinOrder({ price, minTradeVolume: minQty, leverage, precision });
+    marginUsdt = Math.max(marginUsdt, minMargin);
   }
 
-  // The sizing engine always produces a USDT figure to commit (marginUsdt).
+  // Keep the leverage the exchange holds equal to the one used for sizing.
+  if (leverage !== configuredLeverage) {
+    leverageAdjustmentReason = leverage < configuredLeverage
+      ? 'clamped to the ATR stop liquidation ceiling for ' + symbol + ' (configured ' + configuredLeverage + 'x)'
+      : 'exchange holds ' + leverage + 'x for ' + symbol + ' (configured ' + configuredLeverage + 'x)';
+  }
+
+
   // order_unit decides how that figure is interpreted on the way to base qty:
   //   COST     -> it is the margin; notional = margin * leverage   (default)
   //   NOMINAL  -> it is the position value; margin = value / leverage
