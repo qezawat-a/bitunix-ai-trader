@@ -496,6 +496,33 @@ export function computeDynamicTpSl(signal) {
 }
 
 /**
+ * The breakeven stop: entry shifted by a round-turn fee buffer, so the position
+ * closes at 0 instead of paying commission to end flat.
+ *
+ * Extracted from trailingStop() so the RATIO/INTERVAL trailing families can use
+ * the same floor. They used to jump straight from the wide entry stop to the
+ * trailing stop, leaving a band between breakeven_threshold and
+ * trailing_trigger_roi_pct where a winner could round-trip back through entry
+ * and close at a loss — the ATR family was protected and these were not.
+ */
+export function breakevenStop({ side, entry, liqPrice = null }) {
+  const isLong = side === 'LONG';
+  // Round-turn fee buffer: 0.08% of entry covers both legs at the documented
+  // 0.05% maker / 0.06% taker rates without assuming which one filled.
+  const feeBuffer = entry * 0.0008;
+  let stop = isLong ? entry + feeBuffer : entry - feeBuffer;
+  let reason = 'breakeven';
+
+  // Never hand the exchange a stop behind liquidation, even a breakeven one:
+  // on a position already deep in loss, breakeven can be the wrong side of liq.
+  if (liqPrice) {
+    const c = clampStopInsideLiq({ side, entry, slPrice: stop, liqPrice });
+    if (c.adjusted) { stop = c.slPrice; reason += ' (clamped inside liq)'; }
+  }
+  return { stop, reason };
+}
+
+/**
  * Trailing stop level once the position is in profit.
  * Uses the same ATR engine, ratcheting behind price.
  */
@@ -508,10 +535,7 @@ export function trailingStop({ side, entry, currentPrice, atr, roiPct, leverage,
   // ROI here is leveraged return on margin, matching what the exchange UI shows
   if (roiPct < beThreshold) return null;
 
-  // breakeven+fee buffer
-  const feeBuffer = entry * 0.0008;
-  let stop = isLong ? entry + feeBuffer : entry - feeBuffer;
-  let reason = 'breakeven';
+  let { stop, reason } = breakevenStop({ side, entry, liqPrice });
 
   if (roiPct >= trailTrigger) {
     // Trail a fixed distance behind price, in ATR. This used to be a hidden
@@ -524,12 +548,6 @@ export function trailingStop({ side, entry, currentPrice, atr, roiPct, leverage,
       stop = trail;
       reason = `trailing ${k} ATR`;
     }
-  }
-  // Never hand the exchange a stop behind liquidation, even a breakeven one:
-  // on a position already deep in loss, breakeven can be the wrong side of liq.
-  if (liqPrice) {
-    const c = clampStopInsideLiq({ side, entry, slPrice: stop, liqPrice });
-    if (c.adjusted) { stop = c.slPrice; reason += ' (clamped inside liq)'; }
   }
   return { stop, reason };
 }

@@ -145,8 +145,8 @@ endpoint. Run `/models list` to see exactly what your key can call.
 | `cooldown_min` | `5` | Per-symbol cooldown after a trade |
 | `reversal_enabled` | `true` | Flip on strong opposite signals |
 | `reversal_confidence` | `85` | Threshold to flip |
-| `breakeven_threshold` | `20` | ROI % at which the stop moves to breakeven |
-| `trailing_trigger_roi_pct` | `25` | ROI % at which ATR trailing begins |
+| `breakeven_threshold` | `20` | ROI % at which the stop moves to breakeven+fee — every trailing family |
+| `trailing_trigger_roi_pct` | `25` | ROI % at which trailing begins — every trailing family |
 | `trailing_distance_atr` | `0.5` | How far behind price the trailing stop sits, in ATR |
 | `trailing_method` | `ATR` | `ATR` (N ATR behind price) \| `RATIO` (% callback from best) \| `INTERVAL` (absolute price) |
 | `trailing_callback` | `1.5` | Callback for `RATIO` (%) and `INTERVAL` (price) trailing |
@@ -614,6 +614,15 @@ to imply the exchange is holding a trailing order it does not have.
 from the best price seen since activation, never from entry, ratcheting only.
 It reproduces the doc's worked example (long ETH from 2000, activation 2000,
 5% retrace, peak 2500) to the cent: stop 2375.
+
+All three families share one breakeven floor first. Between
+`breakeven_threshold` and `trailing_trigger_roi_pct` the stop sits at
+entry ± a round-turn fee buffer (0.08%), so a winner cannot round-trip back
+through entry and close at a loss. `RATIO` and `INTERVAL` used to skip this
+band entirely and leave the wide entry stop in place until the trailing
+trigger — the `ATR` family was protected and these were not. The floor is
+`breakevenStop()` in `risk.js`, and the guard loop calls it for whichever
+family is configured.
 
 `partial_tp_ladder` is `share@R` pairs, e.g. `40@1,35@2,25@3`. Shares must sum
 to 100 or less and targets must increase; the remainder rides as the runner.

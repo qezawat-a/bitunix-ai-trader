@@ -26,7 +26,7 @@ import bitunix from '../src/exchange/bitunix.js';
 import { manageOpenPositions, positionRoi, resetGuardState } from '../src/trading/manager.js';
 import { resetSymbolConfigCache, resetStopMemory } from '../src/trading/executor.js';
 import { resetKlineCache } from '../src/scanner/scanner.js';
-import { trailingStop } from '../src/trading/risk.js';
+import { trailingStop, breakevenStop } from '../src/trading/risk.js';
 import { resetTrailing } from '../src/trading/tpsl.js';
 import { setSetting } from '../src/db/index.js';
 
@@ -313,6 +313,83 @@ async function test() {
   if (shortMove) {
     assert(shortMove.stop < 10000, `a SHORT stop locks in below entry (${shortMove.stop} < 10000)`);
     assert(shortMove.stop > 9000, `but above the market, so it is a stop (${shortMove.stop} > 9000)`);
+  }
+
+  console.log('\n*** THE BUG: RATIO/INTERVAL skipped the breakeven floor entirely ***');
+  // ROI 22% — past breakeven_threshold (20) but below trailing_trigger_roi_pct
+  // (25). The ATR family moved to breakeven here; the RATIO/INTERVAL families
+  // did nothing at all, because their branch was gated on the trailing trigger.
+  // A winner could therefore round-trip back through entry and close at a loss.
+  // pnl 0.88 on notional 100 at 25x -> 0.88 x 25 / 100 = 22%.
+  for (const m of ['RATIO', 'INTERVAL']) {
+    await setSetting('trailing_method', m, 'test');
+    pendingBook = [{ tpPrice: 12000, slPrice: 9900 }];
+    livePos = [mkPos({ unrealizedPNL: 0.88, markPrice: 10200, leverage: 25, liqPrice: 9600 })];
+    reset();
+    writes = [];
+    const r = await pass();
+    const mv = r.actions.find((a) => a.type === 'stop_moved');
+    assert(mv !== undefined,
+      `${m}: the stop moved in the breakeven band (old code produced ${JSON.stringify(r.actions.map((a) => a.type))})`);
+    if (mv) {
+      assert(mv.reason === 'breakeven' || String(mv.reason).includes('breakeven'),
+        `${m}: reason is breakeven ("${mv.reason}")`);
+      assert(mv.stop >= 10000 && mv.stop < 10050,
+        `${m}: stop sits just above entry to cover fees (${mv.stop})`);
+    }
+  }
+
+  console.log('\nBelow breakeven, RATIO/INTERVAL leave the stop alone');
+  // pnl 0.4 on notional 100 at 25x -> 10%, under breakeven_threshold.
+  await setSetting('trailing_method', 'RATIO', 'test');
+  pendingBook = [{ tpPrice: 12000, slPrice: 9900 }];
+  livePos = [mkPos({ unrealizedPNL: 0.4, markPrice: 10100, leverage: 25, liqPrice: 9600 })];
+  reset();
+  writes = [];
+  const below = await pass();
+  assert(!below.actions.find((a) => a.type === 'stop_moved'),
+    'ROI 10% is below breakeven_threshold, so nothing moves');
+
+  console.log('\nRATIO still trails once past the trigger');
+  // ROI 30% (pnl 1.2 at 25x / notional 100). Activation is the price where the
+  // trigger ROI is reached: 10000 + (10000 x 25) / (100 x 25) = 10100. With the
+  // market at 10200 trailing arms, best 10200, callback 1.5% -> stop 10047.
+  await setSetting('trailing_method', 'RATIO', 'test');
+  pendingBook = [{ tpPrice: 12000, slPrice: 9900 }];
+  livePos = [mkPos({ unrealizedPNL: 1.2, markPrice: 10200, leverage: 25, liqPrice: 9600 })];
+  setCentre(10200);
+  reset();
+  writes = [];
+  const trailed = await pass();
+  const tMove = trailed.actions.find((a) => a.type === 'stop_moved');
+  assert(tMove !== undefined, 'the stop moved past the trailing trigger');
+  if (tMove) {
+    assert(String(tMove.reason).startsWith('trailing'),
+      `reason is the trailing step ("${tMove.reason}")`);
+    assert(tMove.stop > 10008, `it is ahead of the breakeven floor (${tMove.stop} > 10008)`);
+    assert(tMove.stop < 10200, `and still below the market (${tMove.stop} < 10200)`);
+  }
+  setCentre(10000);
+  await setSetting('trailing_method', 'ATR', 'test');
+
+  console.log('\nbreakevenStop is the same floor trailingStop uses');
+  // The two must never diverge: trailingStop() is the ATR family's floor, and
+  // the RATIO/INTERVAL families now share it. Asserting them equal means a
+  // future change to one cannot silently leave the other behind.
+  await setSetting('trailing_method', 'ATR', 'test');
+  {
+    const direct = breakevenStop({ side: 'LONG', entry: 10000, liqPrice: 9600 });
+    const viaTrail = trailingStop({
+      side: 'LONG', entry: 10000, currentPrice: 10000, atr: 50,
+      roiPct: 20, leverage: 25, liqPrice: 9600,
+    });
+    assert(close(direct.stop, viaTrail.stop),
+      `same stop (${direct.stop} vs ${viaTrail.stop})`);
+    assert(direct.reason === viaTrail.reason,
+      `same reason ("${direct.reason}" vs "${viaTrail.reason}")`);
+    // A SHORT mirrors it below entry.
+    const short = breakevenStop({ side: 'SHORT', entry: 10000, liqPrice: 10400 });
+    assert(close(short.stop, 9992), `a SHORT floor sits below entry (${short.stop})`);
   }
 
   console.log('\nAn unreachable exchange is a no-op, never a wrong action');

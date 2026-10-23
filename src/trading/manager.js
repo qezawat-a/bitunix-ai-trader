@@ -1,7 +1,7 @@
 import bitunix from '../exchange/bitunix.js';
 import { config } from '../config.js';
 import { createLogger } from '../logger.js';
-import { trailingStop, computeDynamicTpSl, stopAtrFor } from './risk.js';
+import { trailingStop, breakevenStop, computeDynamicTpSl, stopAtrFor } from './risk.js';
 import {
   trailingStep, resetTrailing, trailingSnapshot, evaluateAccountTpSl, closeEverything,
   mostProtectiveStopRow,
@@ -280,8 +280,10 @@ export async function manageOpenPositions({ notify = null } = {}) {
       //   RATIO / INTERVAL — the exchange's own semantics (help centre id=290):
       //                      arm at an activation price, then close once price
       //                      retraces by a callback from the BEST price seen.
-      // Both end up writing a native stop, so the exchange still protects the
-      // position if this process dies mid-trend.
+      // All three pass through the same breakeven floor first, so the band
+      // between breakeven_threshold and trailing_trigger_roi_pct is protected
+      // whichever family is configured. Both end up writing a native stop, so
+      // the exchange still protects the position if this process dies mid-trend.
       const tm = String(s.trailing_method || 'ATR').toUpperCase();
       let trail = null;
       if (tm === 'ATR') {
@@ -293,19 +295,30 @@ export async function manageOpenPositions({ notify = null } = {}) {
           // the exchange's own liquidation price — authoritative, unlike an estimate
           liqPrice: Number(p.liqPrice) || null,
         });
-      } else if (p.roi >= Number(s.trailing_trigger_roi_pct || 25)) {
-        // activation expressed as the price at which trailing_trigger_roi_pct
-        // of ROI is reached, so one setting drives both trailing families
-        const entry = Number(p.avgOpenPrice);
-        const lev = Number(p.leverage) || 1;
-        const move = (entry * Number(s.trailing_trigger_roi_pct || 25)) / (100 * lev);
-        const activationPrice = p.side === 'LONG' ? entry + move : entry - move;
-        const step = trailingStep({
-          side: p.side, entry, price, activationPrice,
-          callback: Number(s.trailing_callback ?? 1.5), mode: tm,
-          positionId: pid, liqPrice: Number(p.liqPrice) || null,
-        });
-        if (step.armed) trail = { stop: step.stop, reason: step.reason };
+      } else if (p.roi >= Number(s.breakeven_threshold || 20)) {
+        if (p.roi >= Number(s.trailing_trigger_roi_pct || 25)) {
+          // activation expressed as the price at which trailing_trigger_roi_pct
+          // of ROI is reached, so one setting drives both trailing families
+          const entry = Number(p.avgOpenPrice);
+          const lev = Number(p.leverage) || 1;
+          const move = (entry * Number(s.trailing_trigger_roi_pct || 25)) / (100 * lev);
+          const activationPrice = p.side === 'LONG' ? entry + move : entry - move;
+          const step = trailingStep({
+            side: p.side, entry, price, activationPrice,
+            callback: Number(s.trailing_callback ?? 1.5), mode: tm,
+            positionId: pid, liqPrice: Number(p.liqPrice) || null,
+          });
+          if (step.armed) trail = { stop: step.stop, reason: step.reason };
+        } else {
+          // Between breakeven_threshold and the trailing trigger the stop sits
+          // at breakeven+fee, exactly as the ATR family does. Without this the
+          // RATIO/INTERVAL families kept the wide entry stop until the trigger,
+          // so a winner could round-trip back through entry and close at a loss.
+          trail = breakevenStop({
+            side: p.side, entry: Number(p.avgOpenPrice),
+            liqPrice: Number(p.liqPrice) || null,
+          });
+        }
       }
       if (trail) {
         // Ratchet against what the EXCHANGE has, not against our own memory of
