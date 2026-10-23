@@ -3,6 +3,7 @@ import { createLogger } from '../logger.js';
 import { validateSetting } from '../settings-schema.js';
 import mcpClient from '../mcp/client.js';
 import { scan, analyseSymbol, consensus, buildUniverse, getCandles } from '../scanner/scanner.js';
+import { runAnalysis } from './analysis-agent.js';
 import { computeDynamicTpSl } from '../trading/risk.js';
 import {
   openFromSignal, closePosition, closeAll, upsertPositionTpSl,
@@ -108,6 +109,12 @@ export const TOOLS = [
         consensus: c,
       };
     },
+  },
+  {
+    name: 'run_trading_analysis',
+    description: 'Run the full 5-phase trading analysis pipeline for a Bitunix symbol: parallel technical / sentiment / fundamentals / macro analysts, adversarial bull-bear debate with risk analyst, research manager plan, trader entry/stop/size proposal, and final portfolio manager BUY/SELL/HOLD decision. Uses only Bitunix official REST endpoints (kline, depth, tickers, funding rate, position tiers, trading pairs).',
+    parameters: { type: 'object', properties: { symbol: { type: 'string', description: 'Bitunix futures symbol, e.g. BTCUSDT' } }, required: ['symbol'] },
+    handler: async ({ symbol }) => runAnalysis(symbol),
   },
   {
     name: 'scan_market',
