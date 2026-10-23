@@ -230,6 +230,26 @@ Get closed/historical positions.
 
 Implementation: `getHistoryPositions({ symbol, positionId, startTime, endTime, skip = 0, limit = 10 })`
 
+Response: `{ positionList: [ ... ] }`, or a bare array on some accounts.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| positionId | string | Position id |
+| symbol | string | Trading pair |
+| entryPrice | string | Average entry price |
+| closePrice | string | Average close price (null on a partially closed position) |
+| side | string | LONG \| SHORT |
+| leverage | int32 | Leverage |
+| fee | string | **Deducted** transaction fees during the position. Positive = a cost taken out of the position. |
+| funding | string | Total funding fee during the position. Negative = paid by the position, positive = received. |
+| realizedPNL | string | **Realized PnL — EXCLUDES funding fee and transaction fee.** |
+| liqPrice | string | Estimated liquidation price; ≤ 0 means there is no liquidation price |
+| ctime / mtime | int64 | Create / latest modify timestamp (unix ms) |
+
+> Net result = `realizedPNL - fee + funding`. Because `realizedPNL` excludes
+> both, adding the fee back instead of subtracting it overstates performance by
+> twice the commission. Both `manager.js` paths use the formula above.
+
 ---
 
 ### GET /api/v1/futures/position/get_position_tiers

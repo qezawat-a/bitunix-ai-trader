@@ -140,6 +140,14 @@ export async function manageOpenPositions({ notify = null } = {}) {
       // written into memory said LOSS for a winning trade. Normalise first.
       const h = (Array.isArray(hist) ? hist[0] : hist?.positionList?.[0]) || null;
       if (!h) { log.warn(`${t.position_id}: history returned no row — left open, will retry next pass`); continue; }
+      // Documented semantics of get_history_positions:
+      //   realizedPNL  "Realized PnL(exclude funding fee and transaction fee)"
+      //   fee          "Deducted transaction fees ... during the position" —
+      //                positive is a cost taken out of the position
+      //   funding      "total funding fee during the position" — negative is
+      //                paid by the position, positive is received
+      // So the true result is realizedPNL - fee + funding. This is the same
+      // formula exchangePerformance() uses; the two must never disagree.
       const pnl = Number(h?.realizedPNL ?? 0) - Number(h?.fee ?? 0) + Number(h?.funding ?? 0);
       const roi = t.margin_usdt ? (pnl / Number(t.margin_usdt)) * 100 : null;
       await closeTrade({
@@ -417,10 +425,15 @@ export async function portfolioSnapshot() {
  * get_history_positions is the account's own record and covers all of it.
  * Fields (PositionHistoryResp): realizedPNL, fee, funding, ctime, mtime.
  *
- * Fee and funding are reported separately rather than folded into the total:
- * their sign convention is not documented, and quietly adding them with the
- * wrong sign would misstate performance in exactly the direction that flatters
- * it. realizedPNL is the headline; the other two are shown next to it.
+ * The documented semantics (get_history_positions response table):
+ *   realizedPNL  "Realized PnL(exclude funding fee and transaction fee)"
+ *   fee         "Deducted transaction fees ... during the position" — positive
+ *               is a cost taken out of the position
+ *   funding     "total funding fee during the position" — negative is paid by
+ *               the position, positive is received
+ * So the account's true result is realizedPNL - fee + funding. The fee is
+ * reported on its own line as well, because it is the part of the cost the bot
+ * actually controls (position size and trade frequency).
  */
 export async function exchangePerformance(days = 7, { symbol = null } = {}) {
   const endTime = Date.now();
@@ -467,6 +480,11 @@ export async function exchangePerformance(days = 7, { symbol = null } = {}) {
     pnl,
     fees,
     funding,
-    net: pnl + fees + funding,
+    // realizedPNL EXCLUDES fee and funding, so the account's true result is
+    // realizedPNL - fee + funding. Adding the fee back instead of subtracting it
+    // overstates performance by twice the commission — the direction that
+    // flatters the account, and the same formula manager.js uses when it books a
+    // closed position, so the two paths must agree.
+    net: pnl - fees + funding,
   };
 }

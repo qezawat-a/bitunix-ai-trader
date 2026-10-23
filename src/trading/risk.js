@@ -452,11 +452,12 @@ export function computeDynamicTpSl(signal) {
       donLow: signal.donLow ?? null,
       // Read the real setting rather than hardcoding true: the "no fixed target,
       // let it run" branch is only safe while a trailing stop is actually
-      // active. With trailing_method=RATIO/INTERVAL and a position that never
-      // reaches its activation price, the open-ended branch would leave the
-      // position with a stop but no exit.
-      trailingEnabled: String(s.trailing_method || 'ATR').toUpperCase() === 'ATR'
-        && Number(s.auto_trade ?? 1) !== 0,
+      // active. All three trailing families qualify — ATR ratchets a stop behind
+      // price, RATIO/INTERVAL arm at an activation price and then close on the
+      // callback — and all three leave an exchange-side stop on the position, so
+      // none of them can strand a position with no exit. Only a disabled trade
+      // (auto_trade=0) leaves the bracket unprotected.
+      trailingEnabled: Number(s.auto_trade ?? 1) !== 0,
     });
     tpPrice = t.tpPrice;
     tpBasis = t.basis;

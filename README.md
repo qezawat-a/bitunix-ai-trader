@@ -21,8 +21,8 @@ learned in Neon, and exposes everything over MCP.
 | **Agentic, not scripted** | A real think → call tools → observe → decide loop with configurable thinking depth |
 | **10 strategies** | `trend_supertrend` `momentum_macd` `squeeze_breakout` `vwap_reversion` `ema_pullback` `orderflow_funding` `rsi_divergence` `bollinger_bounce` `atr_channel_break` `volume_profile` |
 | **Regime-aware consensus** | Strategies are weighted by market regime, timeframe, *and* their live realised performance |
-| **Fully dynamic TP/SL** | ATR × signal strength. No fixed percentages, no min/max knobs — nothing to tune |
-| **Liquidation-aware stops** | Every stop is clamped inside the exchange's liquidation price (`liq_distance`); if it does not fit, leverage is cut instead of the trade taken |
+| **Fully dynamic TP/SL** | ATR × signal strength, with a fee-band floor on the stop distance so a bracket can never be smaller than the taker round trip |
+| **Liquidation-aware stops** | Every stop is clamped inside the exchange's liquidation price (`liq_distance`); a stop that cannot fit at the configured leverage refuses the trade rather than shrinking the position |
 | **Live protection** | Auto-attaches missing TP/SL, moves to breakeven, then ATR-trails winners |
 | **Reversal engine** | Flips a position when the opposite side clears the reversal threshold |
 | **Dream (reflection)** | Off-hours, with a flat book, reviews its own closed trades and writes the patterns back as durable lessons |
@@ -129,11 +129,15 @@ endpoint. Run `/models list` to see exactly what your key can call.
 | `margin_mode` | `CROSS` | `CROSS` or `ISOLATION` |
 | `position_mode` | `HEDGE` | `HEDGE` or `ONE_WAY` |
 | `order_unit` | `COST` | You size in **USDT margin**; qty is derived and rounded to `basePrecision` |
+| `tp_mode` | `ADAPTIVE` | `ADAPTIVE` = target chosen from trend strength/structure; `FIXED_R` = a fixed multiple of the stop |
+| `tpsl_method` | `POSITION` | `POSITION` = one TP/SL for the whole position; `PARTIAL` = scale-out ladder on top of it |
+| `partial_tp_ladder` | `40@1,35@2,25@3` | `share@R` pairs; shares sum to ≤100 and the remainder rides as a runner |
 | `margin_pct` | `5` | % of available balance used as margin per trade |
 | `symbols` | `AUTO` | `AUTO` = rank the **entire** exchange pair list by volume × range |
-| `universe_size` | How many symbols AUTO keeps, best first. The other ~645 pairs are not scanned |
-| `min_24h_volume_usd` | Liquidity floor (default $20M). Thinner pairs are never scanned |
-| `timeframes` | `1m,3m,5m,15m` | First one is the execution timeframe (ATR stop/target scale to it) |
+| `universe_size` | `40` | How many symbols AUTO keeps, best first. The other ~645 pairs are not scanned |
+| `universe_rank` | `VOLUME` | How the universe is ordered: `VOLUME` \| `GAINERS` \| `LOSERS` \| `MOVERS` |
+| `min_24h_volume_usd` | `20000000` | Liquidity floor in USDT. Thinner pairs are never scanned |
+| `timeframes` | `1m,3m,5m,15m` | Comma-separated. The **first** is the execution timeframe; the ATR stop/target scale to the first **structure** timeframe after it |
 | `min_agreement` | `2` | Distinct strategies that must agree |
 | `min_confidence` | `80` | Consensus confidence gate |
 | `tf_min_confidence` | `60` | Per-timeframe gate for a strategy to get a vote |
@@ -143,14 +147,19 @@ endpoint. Run `/models list` to see exactly what your key can call.
 | `reversal_confidence` | `85` | Threshold to flip |
 | `breakeven_threshold` | `20` | ROI % at which the stop moves to breakeven |
 | `trailing_trigger_roi_pct` | `25` | ROI % at which ATR trailing begins |
-| `trailing_distance_atr` | How far behind price the trailing stop sits, in ATR (default 0.5) |
+| `trailing_distance_atr` | `0.5` | How far behind price the trailing stop sits, in ATR |
+| `trailing_method` | `ATR` | `ATR` (N ATR behind price) \| `RATIO` (% callback from best) \| `INTERVAL` (absolute price) |
+| `trailing_callback` | `1.5` | Callback for `RATIO` (%) and `INTERVAL` (price) trailing |
 | `liq_distance` | `0.50` | Safety gap between the stop and liquidation, as a fraction of the entry→liq distance |
+| `min_stop_pct` | `0.25` | Floor on the stop distance as % of price — a bracket inside the taker round-trip fee band can never pay |
 | `scan_interval_sec` | `15` | Scanner |
 | `manage_interval_sec` | `15` | Mid-position management |
 | `guard_interval_sec` | `15` | Protection pass — merged into the manage loop, which runs at the faster of the two |
 | `report_interval_sec` | `30` | Telegram report (signals + PnL) |
 | `agent_autonomous_sec` | `15` | Free-running agent initiative |
 | `max_open_positions` | `5` | Concurrency cap |
+| `account_tp_usdt` | `0` | Close every position once total unrealised PnL reaches this; `0` = off |
+| `account_sl_usdt` | `0` | Close every position once total unrealised PnL falls to this; `0` = off |
 | `thinking_level` | `high` | `off` / `low` / `medium` / `high` → 1/3/6/10 tool steps |
 | `autocompact` | `true` | Folds old conversation into summaries |
 | `auto_refresh_model` | `true` | Re-detects the model after failures |

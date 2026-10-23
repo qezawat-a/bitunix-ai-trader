@@ -17,10 +17,25 @@ const log = createLogger('executor');
 const leverageApplied = new Map();   // symbol -> {leverage, marginMode}
 let positionModeApplied = null;
 
-/** Make sure position mode / margin mode / leverage match the settings. */
-export async function ensureSymbolConfig(symbol, overrideLev = null) {
+/**
+ * Make sure position mode / margin mode / leverage match the settings.
+ *
+ * Returns the leverage the exchange ACTUALLY holds for this symbol, which is
+ * not always the requested one: the pair's own min/max and the position-tier
+ * cap both win. Callers must size off the returned value and never off the
+ * setting — sizing against a leverage the position does not have makes the
+ * notional wrong by the ratio between the two.
+ *
+ * The cache stores the verified value, and only after the write succeeded (or
+ * after reading back that the exchange already matched). Caching a value that
+ * was merely REQUESTED is what used to make the bot re-issue changeLeverage on
+ * every trade: the exchange clamped to the tier cap, the cache still claimed
+ * the requested number, the next call saw a mismatch and wrote again — so the
+ * leverage was being changed on every entry, shrinking the position each time.
+ */
+export async function ensureSymbolConfig(symbol) {
   const s = settings();
-  const wantLev = Number(overrideLev ?? s.leverage);
+  const wantLev = Number(s.leverage);
   const wantMargin = String(s.margin_mode).toUpperCase() === 'ISOLATED'
     ? 'ISOLATION' : String(s.margin_mode).toUpperCase();   // docs enum: ISOLATION | CROSS
   const wantPosMode = String(s.position_mode).toUpperCase();
@@ -44,24 +59,52 @@ export async function ensureSymbolConfig(symbol, overrideLev = null) {
   }
 
   const cached = leverageApplied.get(symbol);
-  if (cached && cached.leverage === wantLev && cached.marginMode === wantMargin) return;
+  if (cached && cached.leverage === wantLev && cached.marginMode === wantMargin) {
+    return cached.leverage;
+  }
 
   let current = null;
   try { current = await bitunix.getLeverageAndMarginMode(symbol); } catch {}
 
+  // Margin mode first: a wrong mode changes how available balance is computed
+  // (cross unrealised PnL is only added in CROSS), so never claim one that could
+  // not be put in place — leave it uncached so the next call retries.
   if (!current || String(current.marginMode).toUpperCase() !== wantMargin) {
-    try { await bitunix.changeMarginMode({ symbol, marginMode: wantMargin }); }
-    catch (e) { log.warn(`${symbol} margin mode: ${e.message}`); }
+    try {
+      await bitunix.changeMarginMode({ symbol, marginMode: wantMargin });
+    } catch (e) {
+      log.warn(`${symbol} margin mode: ${e.message}`);
+      return Number(current?.leverage) || wantLev;
+    }
   }
+
+  // Leverage. The pair's own range is a hard limit and the exchange may clamp
+  // further by position tier, so the value that comes back is the one to trust.
+  let lev = Number(current?.leverage) || wantLev;
   if (!current || Number(current.leverage) !== wantLev) {
-    // respect the pair's tier limits
-    const info = await bitunix.pairInfo(symbol);
-    const lev = Math.max(Number(info?.minLeverage ?? 1),
-      Math.min(Number(info?.maxLeverage ?? 125), wantLev));
-    try { await bitunix.changeLeverage({ symbol, leverage: lev }); }
-    catch (e) { log.warn(`${symbol} leverage: ${e.message}`); }
+    let target = wantLev;
+    try {
+      const info = await bitunix.pairInfo(symbol);
+      target = Math.max(Number(info?.minLeverage ?? 1),
+        Math.min(Number(info?.maxLeverage ?? 125), wantLev));
+    } catch (e) {
+      log.warn(`${symbol}: pair info unavailable (${e.message}); using the configured leverage`);
+    }
+    try {
+      await bitunix.changeLeverage({ symbol, leverage: target });
+      lev = target;
+    } catch (e) {
+      log.warn(`${symbol} leverage: ${e.message}`);
+    }
+    // verify: the exchange is authoritative and may have clamped the request
+    try {
+      const back = await bitunix.getLeverageAndMarginMode(symbol);
+      if (back && Number(back.leverage) > 0) lev = Number(back.leverage);
+    } catch {}
   }
-  leverageApplied.set(symbol, { leverage: wantLev, marginMode: wantMargin });
+
+  leverageApplied.set(symbol, { leverage: lev, marginMode: wantMargin });
+  return lev;
 }
 
 export function resetSymbolConfigCache() {
@@ -96,7 +139,7 @@ export async function openFromSignal(signal, { aiVerdict = null, marginOverride 
   const s = settings();
   const symbol = signal.symbol;
 
-  await ensureSymbolConfig(symbol);
+  const exchangeLeverage = await ensureSymbolConfig(symbol);
 
   const bal = await availableBalance();
   const positions = await bitunix.getPendingPositions();
@@ -128,63 +171,35 @@ export async function openFromSignal(signal, { aiVerdict = null, marginOverride 
 
   const info = await bitunix.pairInfo(symbol);
   const configuredLeverage = Number(s.leverage);
-  let leverage = Math.max(Number(info?.minLeverage ?? 1),
-    Math.min(Number(info?.maxLeverage ?? 125), Number(s.leverage)));
+  // Size off the leverage the exchange actually holds, not the setting: the
+  // pair's own min/max and the position-tier cap both win. Sizing against a
+  // leverage the position does not have makes the notional wrong by the ratio.
+  let leverage = exchangeLeverage;
   let leverageAdjustmentReason = leverage !== configuredLeverage
-    ? `exchange symbol leverage range is ${info?.minLeverage ?? 1}x–${info?.maxLeverage ?? 125}x`
+    ? `exchange holds ${leverage}x for ${symbol} (configured ${configuredLeverage}x)`
     : null;
 
-  // ---- de-lever so the ATR stop fits inside liquidation -----------------
-  // The stop distance comes from ATR and does not shrink when leverage grows,
-  // but the liquidation price marches toward entry as leverage grows. Past a
-  // certain leverage the stop sits BEYOND liq and the position can only ever
-  // be liquidated. Rather than open that trade, cut the leverage to fit.
+  // ---- liquidation guard ----------------------------------------------
+  // The stop is sized by ATR and does not shrink when leverage grows, but the
+  // liquidation price marches toward entry as leverage grows. Past a certain
+  // leverage the stop sits BEYOND liq and the exchange liquidates first.
+  //
+  // The fix is NOT to cut leverage. Cutting leverage shrinks the position, so a
+  // trade the scanner qualified arrives at half size — that is a loss, not a
+  // safety improvement. computeDynamicTpSl clamps the stop inside liq instead,
+  // so the position keeps its full size and the stop moves to where it can
+  // actually fire. Only a liquidation at/through the entry price is refused.
+  let realMmr = null;
+  try {
+    const tier = await bitunix.tierFor({ symbol, notional: marginUsdt * leverage });
+    realMmr = tier.mmr;
+  } catch (e) {
+    log.warn(`${symbol}: position tiers unavailable (${e.message}); using the maxLeverage estimate`);
+  }
   {
-    const maxLev = Number(info?.maxLeverage);
-
-    // Risk tier lookup. Both the maintenance margin rate AND the maximum
-    // leverage depend on the position's notional value, so a big position on
-    // a thin pair silently loses access to high leverage. Ask the exchange
-    // rather than guessing: get_position_tiers is authoritative.
-    let mmr = null;
-    try {
-      const tier = await bitunix.tierFor({ symbol, notional: marginUsdt * leverage });
-      mmr = tier.mmr;
-      if (tier.leverage < leverage) {
-        leverageAdjustmentReason = `risk tier L${tier.level} maximum is ${tier.leverage}x at this notional`;
-        log.warn(`${symbol}: tier L${tier.level} (notional up to ${tier.endValue}) caps leverage at ${tier.leverage}x, requested ${leverage}x`);
-        await logEvent('leverage_reduced', {
-          symbol, requested: leverage, applied: tier.leverage,
-          reason: `risk tier L${tier.level} maximum`, tier,
-        }, symbol);
-        leverage = tier.leverage;
-        await ensureSymbolConfig(symbol, leverage);
-      }
-    } catch (e) {
-      log.warn(`${symbol}: position tiers unavailable (${e.message}); falling back to the maxLeverage heuristic`);
-    }
-
-    const probe = computeDynamicTpSl({ ...signal, price, leverage: 1, maxLeverage: maxLev, mmr });
-    const atLev = computeDynamicTpSl({ ...signal, price, leverage, maxLeverage: maxLev, mmr });
-    if (atLev.liqUnsafe) {
-      return { ok: false, reason: `refusing ${symbol}: at ${leverage}x liquidation sits at the entry price` };
-    }
-    const safeLev = probe.maxSafeLeverage;
-    if (safeLev < leverage) {
-      const floor = Math.max(Number(info?.minLeverage ?? 1), Number(s.min_leverage ?? 1));
-      const cut = Math.max(floor, Math.min(leverage, safeLev));
-      log.warn(`${symbol}: ${leverage}x would liquidate before the ${probe.slPct}% stop; using ${cut}x`);
-      leverageAdjustmentReason = `the ${probe.slPct}% ATR stop does not fit the configured liquidation buffer at ${leverage}x`;
-      await logEvent('leverage_reduced', {
-        symbol, requested: leverage, applied: cut, stopPct: probe.slPct, reason: 'stop beyond liquidation',
-      }, symbol);
-      if (safeLev < floor) {
-        return { ok: false, reason: `refusing ${symbol}: even ${floor}x liquidates before a ${probe.slPct}% ATR stop` };
-      }
-      leverage = cut;
-      // the exchange must agree, otherwise qty and liq are computed off a
-      // leverage the position does not actually have
-      await ensureSymbolConfig(symbol, leverage);
+    const probe = computeDynamicTpSl({ ...signal, price, leverage, maxLeverage: Number(info?.maxLeverage), mmr: realMmr });
+    if (probe.liqUnsafe) {
+      return { ok: false, reason: `refusing ${symbol}: at ${leverage}x liquidation sits at the entry price — lower /set leverage` };
     }
   }
 
@@ -236,8 +251,6 @@ export async function openFromSignal(signal, { aiVerdict = null, marginOverride 
     return { ok: false, reason: `${symbol} has API trading disabled (isApiSupported=false)` };
   }
 
-  let realMmr = null;
-  try { realMmr = (await bitunix.tierFor({ symbol, notional: marginUsdt * leverage })).mmr; } catch {}
   const risk = computeDynamicTpSl({
     ...signal, price, leverage, maxLeverage: Number(info?.maxLeverage), mmr: realMmr,
   });

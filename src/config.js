@@ -124,8 +124,10 @@ export const config = {
     universe_size: num(process.env.UNIVERSE_SIZE, 40),
     min_24h_volume_usd: num(process.env.MIN_24H_VOLUME_USD, 20_000_000),
     // Scalping-first: 1m/3m for entry timing, 5m/15m for structure.
-    // The FIRST timeframe is the execution one, so the ATR stop and target
-    // scale to it — this is a scalper, not a swing trader.
+    // The FIRST timeframe is the execution one; the ATR stop and target scale to
+    // the first STRUCTURE timeframe after it (see stopAtrFor in risk.js), since
+    // the execution TF's ATR is noise-level and puts the bracket inside the
+    // taker round-trip fee band.
     timeframes: str(process.env.TIMEFRAMES, '1m,3m,5m,15m'),
 
     auto_trade: bool(process.env.AUTO_TRADE, true),
