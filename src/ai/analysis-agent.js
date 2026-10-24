@@ -55,12 +55,22 @@ function normaliseKlines(raw) {
     .sort((a, b) => a.time - b.time);
 }
 
-/** Call the AI and throw a clear error if it returns empty content. */
+/** Call the AI, retrying up to 3 times if it returns empty content. */
 async function chatNonEmpty(opts, phase) {
-  const r = await ai.chat(opts);
-  const content = String(r?.content ?? '').trim();
-  if (!content) throw new Error(`${phase}: AI returned an empty response`);
-  return r;
+  let lastErr = null;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      const r = await ai.chat(opts);
+      const content = String(r?.content ?? '').trim();
+      if (!content) throw new Error('empty response');
+      return r;
+    } catch (e) {
+      lastErr = e;
+      if (attempt < 3 && String(e.message).includes('empty response')) continue;
+      throw e;
+    }
+  }
+  throw new Error(`${phase}: AI returned an empty response after 3 attempts`);
 }
 
 async function fetchKlines(symbol, interval = '1h', limit = 200) {
@@ -341,11 +351,11 @@ MACRO SIGNAL: ${macro}
 // --------------------------------------------------------------- Phase 2 debate
 
 async function bullAnalyst(symbol, technical, news, fundamentals, macro) {
-  const prompt = `You are a Bull Analyst advocating for investing in ${symbol} (Bitunix USDT-M perpetual futures) as of ${TODAY}. Build a strong, evidence-based case emphasizing growth potential, competitive advantages, and positive market indicators.
+  const prompt = `You are a Bull Analyst advocating a long setup on ${symbol} (Bitunix USDT-M perpetual futures) as of ${TODAY}. Build a strong, evidence-based case emphasizing upside potential, breakout structure, and positive market indicators.
 
 Key points:
-- Growth Potential: highlight momentum, breakout structure, funding tailwinds.
-- Competitive Advantages: liquidity, leverage ceiling, exchange depth.
+- Upside Potential: highlight momentum, breakout structure, funding tailwinds.
+- Strengths: liquidity, leverage ceiling, exchange depth.
 - Positive Indicators: use technical, sentiment, and macro data below.
 - Be direct and confident. 150-200 words. Use specific data points.
 
@@ -362,7 +372,7 @@ End with exactly: BULL CONVICTION: HIGH, MEDIUM, or LOW`;
 }
 
 async function bearAnalyst(symbol, technical, news, fundamentals, macro, bullArg) {
-  const prompt = `You are a Bear Analyst making the case against investing in ${symbol} (Bitunix USDT-M perpetual futures). Present a well-reasoned argument emphasizing risks, challenges, and negative indicators — and directly rebut the Bull Analyst's specific claims.
+  const prompt = `You are a Bear Analyst making the case against a long setup on ${symbol} (Bitunix USDT-M perpetual futures). Present a well-reasoned argument emphasizing risks, challenges, and negative indicators — and directly rebut the Bull Analyst's specific claims.
 
 Key points:
 - Risks: liquidation risk, funding squeeze, adverse macro.
@@ -416,7 +426,7 @@ End with exactly: RISK LEVEL: HIGH, MEDIUM, or LOW`;
 // --------------------------------------------------------------- Phase 3 Research Manager
 
 async function researchManager(symbol, bull, bear, risk) {
-  const prompt = `You are the Research Manager for ${symbol} (Bitunix futures). Evaluate the bull/bear debate and deliver a clear investment plan.
+  const prompt = `You are the Research Manager for ${symbol} (Bitunix futures). Evaluate the bull/bear debate and deliver a clear trading plan.
 
 Rating scale (use exactly one): Buy / Overweight / Hold / Underweight / Sell.
 
