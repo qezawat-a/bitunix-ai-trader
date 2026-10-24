@@ -55,6 +55,14 @@ function normaliseKlines(raw) {
     .sort((a, b) => a.time - b.time);
 }
 
+/** Call the AI and throw a clear error if it returns empty content. */
+async function chatNonEmpty(opts, phase) {
+  const r = await ai.chat(opts);
+  const content = String(r?.content ?? '').trim();
+  if (!content) throw new Error(`${phase}: AI returned an empty response`);
+  return r;
+}
+
 async function fetchKlines(symbol, interval = '1h', limit = 200) {
   const raw = await bitunix.getKline({ symbol, interval, limit, type: 'LAST_PRICE' });
   return normaliseKlines(raw);
@@ -349,7 +357,7 @@ MACRO: ${macro.report}
 
 End with exactly: BULL CONVICTION: HIGH, MEDIUM, or LOW`;
 
-  const r = await ai.chat({ messages: [{ role: 'user', content: prompt }], thinking: 'medium', maxTokens: 400 });
+  const r = await chatNonEmpty({ messages: [{ role: 'user', content: prompt }], thinking: 'medium', maxTokens: 400 }, 'bull analyst');
   return r.content;
 }
 
@@ -375,7 +383,7 @@ ${bullArg}
 
 End with exactly: BEAR CONVICTION: HIGH, MEDIUM, or LOW`;
 
-  const r = await ai.chat({ messages: [{ role: 'user', content: prompt }], thinking: 'medium', maxTokens: 400 });
+  const r = await chatNonEmpty({ messages: [{ role: 'user', content: prompt }], thinking: 'medium', maxTokens: 400 }, 'bear analyst');
   return r.content;
 }
 
@@ -401,7 +409,7 @@ BEAR ARGUMENT: ${bearArg}
 
 End with exactly: RISK LEVEL: HIGH, MEDIUM, or LOW`;
 
-  const r = await ai.chat({ messages: [{ role: 'user', content: prompt }], thinking: 'medium', maxTokens: 400 });
+  const r = await chatNonEmpty({ messages: [{ role: 'user', content: prompt }], thinking: 'medium', maxTokens: 400 }, 'risk analyst');
   return r.content;
 }
 
@@ -426,7 +434,7 @@ RATIONALE: [2-3 sentences — who won and why, citing specific evidence]
 
 STRATEGIC ACTIONS: [2-3 sentences — entry approach, sizing, conditions to watch]`;
 
-  const r = await ai.chat({ messages: [{ role: 'user', content: prompt }], thinking: 'medium', maxTokens: 400 });
+  const r = await chatNonEmpty({ messages: [{ role: 'user', content: prompt }], thinking: 'medium', maxTokens: 400 }, 'research manager');
   return r.content;
 }
 
@@ -457,7 +465,7 @@ ENTRY: \$[specific price level or range, based on technical support/resistance]
 STOP: \$[specific price level — where the thesis is invalidated]
 SIZE: [e.g. "3-5% of portfolio, add in 2 tranches" or "maintain current position"]`;
 
-  const r = await ai.chat({ messages: [{ role: 'user', content: prompt }], thinking: 'medium', maxTokens: 400 });
+  const r = await chatNonEmpty({ messages: [{ role: 'user', content: prompt }], thinking: 'medium', maxTokens: 400 }, 'trader');
   return r.content;
 }
 
@@ -490,7 +498,7 @@ BULL: [one sentence — the single strongest bull argument]
 BEAR: [one sentence — the single strongest bear argument]
 VERDICT: [2-3 sentences — why the bull or bear case won and what specifically to do]`;
 
-  const r = await ai.chat({ messages: [{ role: 'user', content: prompt }], thinking: 'high', maxTokens: 600 });
+  const r = await chatNonEmpty({ messages: [{ role: 'user', content: prompt }], thinking: 'high', maxTokens: 600 }, 'portfolio manager');
   return r.content;
 }
 
@@ -512,6 +520,11 @@ export async function runAnalysis(symbol) {
     macroAnalyst(sym),
   ]);
   log.info(`analysis-agent: Phase 1 complete — tech:${technical.signal} news:${news.signal} fund:${fundamentals.signal} macro:${macro.signal}`);
+
+  const techPrice = Number(technical?.data?.price);
+  if (!Number.isFinite(techPrice) || techPrice <= 0) {
+    throw new Error(`No valid price feed for ${sym} on Bitunix — market data may be unavailable for this symbol`);
+  }
 
   // Phase 2 — sequential debate
   const bull = await bullAnalyst(sym, technical, news, fundamentals, macro);
