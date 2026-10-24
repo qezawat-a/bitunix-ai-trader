@@ -40,11 +40,6 @@ const TODAY = new Date().toISOString().slice(0, 10);
  * Fetch 200 candles for a symbol at 1h interval (primary timeframe for the
  * analysis agent), normalised into {time, open, high, low, close, volume}.
  */
-async function fetchKlines(symbol, interval = '1h', limit = 200) {
-  const raw = await bitunix.getKline({ symbol, interval, limit, type: 'LAST_PRICE' });
-  return I.normaliseKlines ? I.normaliseKlines(raw) : normaliseKlines(raw);
-}
-
 function normaliseKlines(raw) {
   return (raw || [])
     .map((k) => ({
@@ -54,9 +49,15 @@ function normaliseKlines(raw) {
       low: Number(k.low),
       close: Number(k.close),
       volume: Number(k.baseVol ?? k.volume ?? 0),
+      quoteVol: Number(k.quoteVol ?? 0),
     }))
     .filter((c) => Number.isFinite(c.close) && c.close > 0)
     .sort((a, b) => a.time - b.time);
+}
+
+async function fetchKlines(symbol, interval = '1h', limit = 200) {
+  const raw = await bitunix.getKline({ symbol, interval, limit, type: 'LAST_PRICE' });
+  return normaliseKlines(raw);
 }
 
 /** Fetch a ticker snapshot for one symbol. */
@@ -184,14 +185,14 @@ async function technicalAnalyst(symbol) {
 
   const report = `
 TECHNICAL ANALYSIS — ${symbol} (Bitunix futures, 1h timeframe, ${TODAY})
-Price: ${tech.price.toFixed(2)} USDT | 24h change: ${ticker?.change24h ?? 'n/a'}% | Volume: ${ticker?.volume24h ?? 'n/a'}
+Price: ${(tech.price ?? 0).toFixed(2)} USDT | 24h change: ${ticker?.change24h ?? 'n/a'}% | Volume: ${ticker?.volume24h ?? 'n/a'}
 
 Trend: Price vs EMA10 (${tech.ema10?.toFixed(2) ?? 'n/a'}), SMA50 (${tech.sma50?.toFixed(2) ?? 'n/a'}), SMA200 (${tech.sma200?.toFixed(2) ?? 'n/a'}).
 Structure: ${tech.structure}. Immediate trend: ${tech.trend}.
 
 Momentum: RSI(14) = ${rsi.toFixed(1)} → ${momentum}. MACD line ${tech.macdLine?.toFixed(4) ?? 'n/a'} vs signal ${tech.macdSignal?.toFixed(4) ?? 'n/a'}, histogram ${tech.macdHist?.toFixed(4) ?? 'n/a'} (${tech.macdDirection}).
 
-Volatility: ATR(14) = ${tech.atr?.toFixed(4) ?? 'n/a'} (${tech.atrPct?.toFixed(2)}% of price). Bollinger position: price ${(price > (tech.bbUpper ?? price) ? 'above upper band' : price < (tech.bbLower ?? price) ? 'below lower band' : 'within bands')}. Spread: ${spread.toFixed(3)}%.
+Volatility: ATR(14) = ${tech.atr?.toFixed(4) ?? 'n/a'} (${tech.atrPct?.toFixed(2)}% of price). Bollinger position: price ${(tech.price > (tech.bbUpper ?? tech.price) ? 'above upper band' : tech.price < (tech.bbLower ?? tech.price) ? 'below lower band' : 'within bands')}. Spread: ${spread.toFixed(3)}%.
 
 Key levels: nearest support ≈ ${tech.nearestSupport?.toFixed(2)}, nearest resistance ≈ ${tech.nearestResistance?.toFixed(2)}. BB upper ${tech.bbUpper?.toFixed(2)}, mid ${tech.bbMid?.toFixed(2)}, lower ${tech.bbLower?.toFixed(2)}.
 
@@ -432,7 +433,7 @@ STRATEGIC ACTIONS: [2-3 sentences — entry approach, sizing, conditions to watc
 // --------------------------------------------------------------- Phase 4 Trader
 
 async function trader(symbol, researchPlan, technical) {
-  const price = technical.data.price;
+  const price = Number(technical?.data?.price ?? 0);
   const atr = technical.data.atr;
   const support = technical.data.nearestSupport;
   const resistance = technical.data.nearestResistance;
