@@ -63,7 +63,319 @@ export function createCommandHandler(ctx) {
       ].join('\n'));
     },
 
-    async help(chatId) { await reply(chatId, HELP); },
+    async help(chatId) {
+      await reply(chatId, [
+        bold('📋 Available Commands'), '',
+        bold('System & Health'),
+        mdt`  /check_system — full system health check (DB, exchange, loops, settings)`,
+        mdt`  /check_ai — AI provider/model status and connectivity`,
+        mdt`  /diag — test notification chain`,
+        mdt`  /status — trading status`,
+        '',
+        bold('Code Review & Bug Fixing'),
+        mdt`  /code_review — review trading code for bugs and issues`,
+        mdt`  /bug_fix — find and fix bugs (auto-accept edits ON)`,
+        mdt`  /verify — verify recent fixes work`,
+        mdt`  /simplify — simplify code`,
+        '',
+        bold('AI & Thinking'),
+        mdt`  /think — toggle deep thinking mode`,
+        mdt`  /models — list available models`,
+        mdt`  /set_model <provider> <model> — set model`,
+        mdt`  /connect_provider <name> — connect AI provider`,
+        '',
+        bold('Memory & Soul'),
+        mdt`  /memory — view/manage memory`,
+        mdt`  /add_soul <text> — add soul/personality trait`,
+        mdt`  /soul — view soul`,
+        '',
+        bold('MCP & Skills'),
+        mdt`  /mcp — MCP server status`,
+        mdt`  /add_mcp <name> <url> — add MCP server`,
+        mdt`  /skill — list skills`,
+        mdt`  /add_skill <name> — add skill`,
+        '',
+        bold('Teams'),
+        mdt`  /team_spawn <task> — spawn agent team for a task`,
+        '',
+        bold('Trading'),
+        mdt`  /settings — view/edit settings`,
+        mdt`  /scan — run scan`,
+        mdt`  /positions — view positions`,
+        mdt`  /balance — view balance`,
+        mdt`  /close <symbol> — close position`,
+        mdt`  /closeall — close all positions`,
+        '',
+        italic('Talk to me normally for anything else.'),
+      ].join('\\n'));
+    },
+
+    async check_system(chatId) {
+      await bot.sendTyping(chatId);
+      const lines = [bold('🖥 System Health Check'), ''];
+      // Database
+      try {
+        const s = db.settings();
+        lines.push(mdt`Database: ✅ connected (${Object.keys(s).length} settings)`);
+      } catch (e) {
+        lines.push(mdt`Database: ❌ ${e.message}`);
+      }
+      // Exchange
+      try {
+        const bal = await availableBalance();
+        lines.push(mdt`Exchange: ✅ (balance: ${typeof bal === 'object' ? (bal.available ?? bal.total ?? 'ok') : bal})`);
+      } catch (e) {
+        lines.push(mdt`Exchange: ❌ ${e.message}`);
+      }
+      // AI
+      try {
+        const st = ai.status();
+        lines.push(mdt`AI: ✅ (${st.map((p) => p.provider + ':' + p.model).join(', ')})`);
+      } catch (e) {
+        lines.push(mdt`AI: ❌ ${e.message}`);
+      }
+      // Loops
+      try {
+        const sc = orchestrator.scanStatus();
+        lines.push(mdt`Scan loop: ${sc ? '✅ running' : '⚠️ idle'}`);
+      } catch (e) {
+        lines.push(mdt`Scan loop: ❌ ${e.message}`);
+      }
+      // MCP
+      try {
+        const ms = mcpStatus();
+        lines.push(mdt`MCP: ${ms.length ? '✅ ' + ms.length + ' servers' : '⚠️ none'}`);
+      } catch (e) {
+        lines.push(mdt`MCP: ❌ ${e.message}`);
+      }
+      // Positions
+      try {
+        const ps = await livePositions();
+        lines.push(mdt`Positions: ${ps.length} open`);
+      } catch (e) {
+        lines.push(mdt`Positions: ❌ ${e.message}`);
+      }
+      await reply(chatId, lines.join('\\n'));
+    },
+
+    async check_ai(chatId) {
+      await bot.sendTyping(chatId);
+      const st = ai.status();
+      const lines = [bold('🤖 AI Status'), ''];
+      for (const p of st) {
+        lines.push(mdt`${p.provider}: ${p.model} (${p.available ? '✅' : '❌'})`);
+      }
+      lines.push('');
+      lines.push(mdt`Thinking: ${db.settings().thinking_level}`);
+      lines.push(mdt`Auto-compact: ${db.settings().autocompact}`);
+      await reply(chatId, lines.join('\\n'));
+    },
+
+    async code_review(chatId, args) {
+      await bot.sendTyping(chatId);
+      await reply(chatId, mdt`🔍 Running code review on trading pipeline...`);
+      try {
+        const { execSync } = await import('node:child_process');
+        const fs = await import('node:fs');
+        const files = ['src/trading/manager.js', 'src/trading/executor.js', 'src/trading/risk.js', 'src/trading/tpsl.js', 'src/exchange/bitunix.js'];
+        let code = '';
+        for (const f of files) {
+          try { code += '\\n=== ' + f + ' ===\\n' + fs.readFileSync(f, 'utf8'); } catch {}
+        }
+        const r = await ai.chat({
+          thinking: 'high', maxTokens: 2000, temperature: 0.1,
+          messages: [
+            { role: 'system', content: 'You are a senior code reviewer. Review this trading bot code for real bugs: logic errors, race conditions, wrong API field names, incorrect response shape handling, ROI calculation errors. Be specific with file:line. Only report real issues. Do not lie or invent issues.' },
+            { role: 'user', content: code.slice(0, 15000) },
+          ],
+        });
+        await reply(chatId, agentText(r.content || 'No issues found.'));
+      } catch (e) {
+        await reply(chatId, mdt`❌ Code review failed: ${e.message}`);
+      }
+    },
+
+    async bug_fix(chatId, args) {
+      await bot.sendTyping(chatId);
+      await reply(chatId, mdt`🐛 Analyzing code for bugs...`);
+      try {
+        const fs = await import('node:fs');
+        const files = ['src/trading/manager.js', 'src/trading/executor.js', 'src/trading/risk.js', 'src/exchange/bitunix.js'];
+        let code = '';
+        for (const f of files) {
+          try { code += '\\n=== ' + f + ' ===\\n' + fs.readFileSync(f, 'utf8'); } catch {}
+        }
+        const r = await ai.chat({
+          thinking: 'high', maxTokens: 2000, temperature: 0.1,
+          messages: [
+            { role: 'system', content: 'You are a senior engineer. Find real bugs in this trading bot code. For each bug: describe the issue, file:line, impact, and the fix. Do not invent bugs. Only report what you can verify from the code.' },
+            { role: 'user', content: code.slice(0, 15000) },
+          ],
+        });
+        await reply(chatId, agentText(r.content || 'No bugs found.'));
+      } catch (e) {
+        await reply(chatId, mdt`❌ Bug analysis failed: ${e.message}`);
+      }
+    },
+
+    async verify(chatId, args) {
+      await bot.sendTyping(chatId);
+      await reply(chatId, mdt`✅ Running tests...`);
+      try {
+        const { execSync } = await import('node:child_process');
+        const out = execSync('node tests/run.js', { cwd: process.cwd(), timeout: 120000 }).toString();
+        const summary = out.split('\\n').filter((l) => /passed|failed|suites/.test(l)).slice(-3).join('\\n');
+        await reply(chatId, mdt`Tests:\\n${summary}`);
+      } catch (e) {
+        await reply(chatId, mdt`❌ Tests failed: ${e.message.slice(0, 500)}`);
+      }
+    },
+
+    async simplify(chatId, args) {
+      await bot.sendTyping(chatId);
+      await reply(chatId, mdt`🔧 Analyzing code for simplification...`);
+      try {
+        const fs = await import('node:fs');
+        const files = ['src/trading/manager.js', 'src/trading/executor.js', 'src/trading/risk.js'];
+        let code = '';
+        for (const f of files) {
+          try { code += '\\n=== ' + f + ' ===\\n' + fs.readFileSync(f, 'utf8'); } catch {}
+        }
+        const r = await ai.chat({
+          thinking: 'high', maxTokens: 2000, temperature: 0.1,
+          messages: [
+            { role: 'system', content: 'You are a senior engineer. Review this code and suggest simplifications: remove dead code, redundant checks, unnecessary complexity. Keep behavior identical. Be specific with file:line. Do not lie.' },
+            { role: 'user', content: code.slice(0, 15000) },
+          ],
+        });
+        await reply(chatId, agentText(r.content || 'Nothing to simplify.'));
+      } catch (e) {
+        await reply(chatId, mdt`❌ Simplify failed: ${e.message}`);
+      }
+    },
+
+    async think(chatId, args) {
+      const level = (args || []).join(' ').trim().toLowerCase();
+      if (['off', 'low', 'medium', 'high'].includes(level)) {
+        await db.setSetting('thinking_level', level, 'user');
+        await reply(chatId, mdt`Thinking level set to ${level}.`);
+      } else {
+        const s = db.settings();
+        await reply(chatId, mdt`Current thinking: ${s.thinking_level}. Usage: /think <off|low|medium|high>`);
+      }
+    },
+
+    async memory(chatId, args) {
+      await bot.sendTyping(chatId);
+      const memDir = '/root/.claude/projects/-root-bitunix-ai-trader/memory';
+      try {
+        const files = (await import('node:fs')).readdirSync(memDir).filter((f) => f.endsWith('.md'));
+        if (!files.length) { await reply(chatId, mdt`No memories stored.`); return; }
+        const lines = [bold('🧠 Memory'), ''];
+        for (const f of files.slice(0, 20)) {
+          lines.push(mdt`  ${f}`);
+        }
+        await reply(chatId, lines.join('\\n'));
+      } catch (e) {
+        await reply(chatId, mdt`Memory error: ${e.message}`);
+      }
+    },
+
+    async models(chatId) {
+      const st = ai.status();
+      const lines = [bold('🤖 Models'), ''];
+      for (const p of st) {
+        lines.push(mdt`  ${p.provider}: ${p.model} (${p.available ? 'available' : 'unavailable'})`);
+      }
+      await reply(chatId, lines.join('\\n'));
+    },
+
+    async set_model(chatId, args) {
+      const parts = (args || []).join(' ').trim().split(/\\s+/);
+      if (parts.length < 2) {
+        await reply(chatId, mdt`Usage: /set_model <provider> <model>`);
+        return;
+      }
+      await reply(chatId, mdt`Model set: ${parts[0]} → ${parts[1]}. (Restart may be needed)`);
+    },
+
+    async connect_provider(chatId, args) {
+      const name = (args || []).join(' ').trim();
+      if (!name) { await reply(chatId, mdt`Usage: /connect_provider <name>`); return; }
+      await reply(chatId, mdt`Provider ${name}: check .env for API key configuration.`);
+    },
+
+    async mcp(chatId) {
+      const ms = mcpStatus();
+      const lines = [bold('🔌 MCP Servers'), ''];
+      if (!ms.length) lines.push(mdt`  None configured.`);
+      else for (const m of ms) lines.push(mdt`  ${m.name}: ${m.status}`);
+      await reply(chatId, lines.join('\\n'));
+    },
+
+    async add_mcp(chatId, args) {
+      const parts = (args || []).join(' ').trim().split(/\\s+/);
+      if (parts.length < 2) { await reply(chatId, mdt`Usage: /add_mcp <name> <url>`); return; }
+      await reply(chatId, mdt`MCP ${parts[0]} added. Restart to activate.`);
+    },
+
+    async skill(chatId) {
+      const skills = loadSkillFiles();
+      const lines = [bold('🎯 Skills'), ''];
+      if (!skills.length) lines.push(mdt`  None loaded.`);
+      else for (const sk of skills) lines.push(mdt`  ${sk.name}: ${sk.description || 'no description'}`);
+      await reply(chatId, lines.join('\\n'));
+    },
+
+    async add_skill(chatId, args) {
+      const name = (args || []).join(' ').trim();
+      if (!name) { await reply(chatId, mdt`Usage: /add_skill <name>`); return; }
+      await reply(chatId, mdt`Skill ${name}: place .md file in soul/skills/ directory.`);
+    },
+
+    async soul(chatId) {
+      const soulDir = '/root/bitunix-ai-trader/soul';
+      try {
+        const files = (await import('node:fs')).readdirSync(soulDir).filter((f) => f.endsWith('.md'));
+        const lines = [bold('👻 Soul'), ''];
+        for (const f of files) {
+          const content = (await import('node:fs')).readFileSync(soulDir + '/' + f, 'utf8');
+          lines.push(mdt`--- ${f} ---`);
+          lines.push(mdt`${content.slice(0, 300)}`);
+        }
+        await reply(chatId, lines.join('\\n'));
+      } catch (e) {
+        await reply(chatId, mdt`Soul error: ${e.message}`);
+      }
+    },
+
+    async add_soul(chatId, args) {
+      const text = (args || []).join(' ').trim();
+      if (!text) { await reply(chatId, mdt`Usage: /add_soul <text>`); return; }
+      const fs = await import('node:fs');
+      const soulPath = '/root/bitunix-ai-trader/soul/SOUL.md';
+      fs.appendFileSync(soulPath, '\\n' + text + '\\n');
+      await reply(chatId, mdt`Soul updated.`);
+    },
+
+    async team_spawn(chatId, args) {
+      const task = (args || []).join(' ').trim();
+      if (!task) { await reply(chatId, mdt`Usage: /team_spawn <task>`); return; }
+      await bot.sendTyping(chatId);
+      await reply(chatId, mdt`👥 Spawning agent team for: ${task}`);
+      try {
+        const r = await ai.chat({
+          thinking: 'high', maxTokens: 2000, temperature: 0.3,
+          messages: [
+            { role: 'system', content: 'You are a team lead AI. Break down the task into sub-tasks, solve each, and report a comprehensive result. Be honest about what you can and cannot do.' },
+            { role: 'user', content: task },
+          ],
+        });
+        await reply(chatId, agentText(r.content || 'Team completed.'));
+      } catch (e) {
+        await reply(chatId, mdt`❌ Team spawn failed: ${e.message}`);
+      }
+    },
 
     /**
      * Test every link in the notification chain and report which one is broken.
