@@ -194,7 +194,13 @@ export class BitunixClient {
   // ---------------------------------------------------------------- position
   // GET /api/v1/futures/position/get_pending_positions
   getPendingPositions({ symbol, positionId } = {}) {
-    return this._get('/api/v1/futures/position/get_pending_positions', { symbol, positionId });
+    // The API wraps results in { positionList: [...] } but has also been seen
+    // to answer with a bare array (matching the history endpoint's behaviour).
+    // Normalise to a flat array here so every caller — manager, executor,
+    // positionQtyOf — reads the same shape. Without this, livePositions()
+    // returned [] on the wrapped response and breakeven/trailing never ran.
+    return this._get('/api/v1/futures/position/get_pending_positions', { symbol, positionId })
+      .then((res) => Array.isArray(res) ? res : (res?.positionList || []));
   }
 
   // GET /api/v1/futures/position/get_history_positions

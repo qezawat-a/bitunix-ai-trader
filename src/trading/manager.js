@@ -67,7 +67,6 @@ export function positionRoi(p) {
 
 export async function livePositions() {
   const ps = await bitunix.getPendingPositions();
-  if (!Array.isArray(ps)) return [];
   return (ps || []).map((p) => ({
     ...p,
     roi: positionRoi(p),
