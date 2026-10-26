@@ -234,7 +234,12 @@ export async function manageOpenPositions({ notify = null } = {}) {
     // have closed the trade.
     let tpsl = null;
     try {
-      tpsl = await bitunix.getPendingTpSlOrders({ symbol: p.symbol, positionId: pid }) || [];
+      const raw = await bitunix.getPendingTpSlOrders({ symbol: p.symbol, positionId: pid });
+      // Bitunix returns { orderList: [...] }, but a bare array has been seen too;
+      // normalise the same way executor.upsertPositionTpSl does so the !length
+      // check below tests the actual row count, not an undefined .length on the
+      // wrapper object.
+      tpsl = (Array.isArray(raw) ? raw : (raw?.orderList || []));
     } catch (e) {
       log.warn(`${p.symbol}: cannot read TP/SL (${e.message}) — leaving the existing one alone`);
       tpsl = null;

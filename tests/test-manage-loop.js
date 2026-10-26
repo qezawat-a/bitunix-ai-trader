@@ -119,7 +119,10 @@ function install() {
   reset();
 
   bitunix.getPendingPositions = async () => livePos;
-  bitunix.getPendingTpSlOrders = async () => pendingBook;
+  // Real Bitunix API returns { orderList: [...] }, not a bare array; the manager
+  // normalises both shapes. Returning the wrapper shape here is what caught the
+  // bug where !tpsl.length was true on an object, making every position look naked.
+  bitunix.getPendingTpSlOrders = async () => ({ orderList: pendingBook });
   bitunix.getHistoryPositions = async () => ({ positionList: [] });
   bitunix.pairInfo = async () => ({ maxLeverage: 125, minLeverage: 1, basePrecision: 4, minTradeVolume: 0.001 });
   bitunix.tierFor = async () => ({ mmr: 0.005, maxLeverage: 125 });
