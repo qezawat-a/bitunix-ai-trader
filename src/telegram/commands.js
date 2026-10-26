@@ -1450,7 +1450,7 @@ export function createCommandHandler(ctx) {
       const envChecks = [
         ['AI_PROVIDER', !!config.ai.provider],
         ['DATABASE_URL', !!config.db.url],
-        ['BITUNIX_API_KEY', !!config.exchange.key],
+        ['BITUNIX_API_KEY', !!config.bitunix.key],
         ['Telegram token', !!config.telegram.token],
       ];
       for (const [name, val] of envChecks) {
