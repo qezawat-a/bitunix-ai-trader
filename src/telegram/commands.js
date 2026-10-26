@@ -163,7 +163,7 @@ export function createCommandHandler(ctx) {
       const st = ai.status();
       const lines = [bold('🤖 AI Status'), ''];
       for (const p of st) {
-        lines.push(mdt`${p.provider}: ${p.model} (${p.available ? '✅' : '❌'})`);
+        lines.push(mdt`${p.provider}: ${p.model} (${p.model && p.model !== '(not resolved yet)' ? '✅' : '❌'})`);
       }
       lines.push('');
       lines.push(mdt`Thinking: ${db.settings().thinking_level}`);
