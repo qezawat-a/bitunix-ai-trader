@@ -1249,66 +1249,58 @@ export function createCommandHandler(ctx) {
       ].join('\n'));
     },
 
-    /** add_soul <name> | <content> — add a new soul/identity file */
+    /** add_soul <content> — append to the existing soul (like Go's /add_soul) */
     async add_soul(chatId, args) {
-      const joined = args.join(' ');
-      const bar = joined.indexOf('|');
-      if (bar < 0) {
-        return reply(chatId, mdt`Usage: /add_soul <name> | <content>`);
+      const content = args.join(' ').trim();
+      if (!content) {
+        return reply(chatId, mdt`Usage: /add_soul <text to append to the soul>`);
       }
 
-      const name = joined.slice(0, bar).trim();
-      const content = joined.slice(bar + 1).trim();
+      const soulFile = path.join(process.cwd(), 'soul/SOUL.md');
+      if (!fs.existsSync(soulFile)) {
+        return reply(chatId, mdt`❌ soul/SOUL.md not found.`);
+      }
+
+      try {
+        const current = fs.readFileSync(soulFile, 'utf8');
+        const timestamp = new Date().toISOString().slice(0, 16).replace('T', ' ');
+        const updated = current + `\n\n# ADDED ${timestamp}\n${content}\n`;
+        fs.writeFileSync(soulFile, updated);
+        agent.reloadSoul?.();
+        return reply(chatId, mdt`👻 Soul updated. J-Rock remembers who it is.`);
+      } catch (e) {
+        return reply(chatId, mdt`❌ Failed to update soul: ${e.message}`);
+      }
+    },
+
+    /** add_skill <name> <content> — add a skill */
+    async add_skill(chatId, args) {
+      // Split on first space to get name, rest is content
+      const firstSpace = args.join(' ').indexOf(' ');
+      if (firstSpace === -1) {
+        return reply(chatId, mdt`Usage: /add_skill <name> <content>`);
+      }
+
+      const name = args.join(' ').slice(0, firstSpace).trim();
+      const content = args.join(' ').slice(firstSpace + 1).trim();
 
       if (!name || !content) {
         return reply(chatId, mdt`Both name and content are required.`);
-      }
-
-      const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'soul';
-      const soulDir = path.join(process.cwd(), 'soul');
-      const f = path.join(soulDir, `${slug}.md`);
-
-      // Check if file already exists
-      if (fs.existsSync(f)) {
-        return reply(chatId, mdt`⚠️ File ${slug}.md already exists. Use /reload to re-read or manually edit.`);
-      }
-
-      fs.writeFileSync(f, content + '\n');
-      agent.reloadSoul?.();
-
-      return reply(chatId, mdt`✅ Saved soul/${slug}.md — the agent knows it from the next prompt.`);
-    },
-
-    /** add_skill <name> | <when> | <content> — add a new skill file */
-    async add_skill(chatId, args) {
-      const joined = args.join(' ');
-      const bars = [joined.indexOf('|'), joined.indexOf('|', joined.indexOf('|') + 1)];
-      if (bars[1] === -1) {
-        return reply(chatId, mdt`Usage: /add_skill <name> | <when> | <content>`);
-      }
-
-      const name = joined.slice(0, bars[0]).trim();
-      const when = joined.slice(bars[0] + 1, bars[1]).trim();
-      const content = joined.slice(bars[1] + 1).trim();
-
-      if (!name || !content) {
-        return reply(chatId, mdt`Both name, when clause, and content are required.`);
       }
 
       const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'skill';
       const skillsDir = path.join(process.cwd(), 'soul', 'skills');
       const f = path.join(skillsDir, `${slug}.md`);
 
-      // Check if file already exists
       if (fs.existsSync(f)) {
-        return reply(chatId, mdt`⚠️ File ${slug}.md already exists.`);
+        return reply(chatId, mdt`⚠️ Skill ${slug}.md already exists.`);
       }
 
       fs.mkdirSync(skillsDir, { recursive: true });
-      fs.writeFileSync(f, `---\nname: ${name}\nwhen: ${when}\nenabled: true\n---\n\n${content}\n`);
+      fs.writeFileSync(f, `---\nname: ${name}\nenabled: true\n---\n\n${content}\n`);
       agent.reloadSoul?.();
 
-      return reply(chatId, mdt`✅ Saved soul/skills/${slug}.md — the agent knows it from the next prompt.`);
+      return reply(chatId, mdt`✅ Skill ${name} saved to soul/skills/${slug}.md`);
     },
 
     /** add_mcp <name> <command> [args...] — add an MCP server config */
@@ -1361,63 +1353,113 @@ export function createCommandHandler(ctx) {
     async code_review(chatId) {
       await bot.sendTyping(chatId);
 
-      // Import the skill dynamically to avoid circular dependency
-      const { codehealthMcp } = await import('../skills/codehealth-mcp/index.js').catch(() => ({ codehealthMcp: null }));
-
-      if (!codehealthMcp) {
-        return reply(chatId, mdt`⚠️ Code health check not available. Run in a project with @poolside/codehealth-mcp installed.`);
-      }
-
-      try {
-        const result = await codehealthMcp();
-        return reply(chatId, result);
-      } catch (e) {
-        return reply(chatId, mdt`❌ Code review failed: ${e.message}`);
-      }
-    },
-
-    /** /bug_fixes — analyze and suggest fixes for bugs */
-    async bug_fixes(chatId) {
-      await bot.sendTyping(chatId);
-
-      const bugs = [];
-
-      // Check for common issues
       const srcDir = path.join(process.cwd(), 'src');
-      if (fs.existsSync(srcDir)) {
-        const files = fs.readdirSync(srcDir, { recursive: true }).filter(f => f.endsWith('.js'));
-        for (const f of files) {
-          const content = fs.readFileSync(path.join(srcDir, f), 'utf8');
+      if (!fs.existsSync(srcDir)) {
+        return reply(chatId, mdt`❌ No src/ directory found.`);
+      }
 
-          // Check for common bug patterns
-          if (content.includes('try {' ) && !content.includes('catch')) {
-            bugs.push(`${f}: missing catch block after try`);
+      const files = [];
+      const walkDir = (dir, basePath = srcDir) => {
+        for (const item of fs.readdirSync(dir, { withFileTypes: true })) {
+          const full = path.join(dir, item.name);
+          if (item.isDirectory()) {
+            if (!['node_modules', '.git'].includes(item.name)) walkDir(full, basePath);
+          } else if (item.name.endsWith('.js')) {
+            files.push(full);
           }
-          if (content.match(/\.then\([^)]*\)\.catch\([^)]*\)\.then\(/)) {
-            bugs.push(`${f}: promise chain may swallow errors`);
+        }
+      };
+      walkDir(srcDir);
+
+      if (files.length === 0) {
+        return reply(chatId, mdt`No .js files found in src/.`);
+      }
+
+      const report = [bold('🔍 CODE REVIEW'), ''];
+      let issuesFound = 0;
+
+      for (const f of files) {
+        const relPath = path.relative(process.cwd(), f);
+        const content = fs.readFileSync(f, 'utf8');
+        const lines = content.split('\n');
+
+        // Check for common issues
+        const checks = [
+          {
+            name: 'missing catch',
+            test: (c) => /try\s*\{/.test(c) && !/catch\s*\(.+\)\s*\{/.test(c),
+          },
+          {
+            name: 'empty promise',
+            test: (c) => /\bthrow\b.*Promise/.test(c),
+          },
+          {
+            name: 'TODO/FIXME',
+            test: (c) => /\b(TODO|FIXME)\b/.test(c),
+          },
+        ];
+
+        const fileIssues = [];
+        for (const check of checks) {
+          const matches = content.split('\n').map((l, i) => ({ line: i + 1, content: l }))
+            .filter(l => check.test(l.content));
+          for (const m of matches) {
+            fileIssues.push(`line ${m.line}: ${m.content.trim().substring(0, 100)}`);
           }
-          if (content.includes('TODO') || content.includes('FIXME')) {
-            bugs.push(`${f}: contains TODO/FIXME comments`);
+        }
+
+        if (fileIssues.length > 0) {
+          issuesFound++;
+          report.push(mdt`${relPath}:`);
+          for (const issue of fileIssues.slice(0, 3)) {
+            report.push(mdt`  • ${issue}`);
           }
+          if (fileIssues.length > 3) {
+            report.push(mdt`  • ...and ${fileIssues.length - 3} more`);
+          }
+          report.push('');
         }
       }
 
-      if (!bugs.length) {
-        return reply(chatId, bold('✅ No obvious bugs found in the codebase.'));
+      if (issuesFound === 0) {
+        report.push(mdt`All files reviewed — no issues found.`);
+      } else {
+        report.push('', italic(`Total: ${issuesFound} file(s) with issues.`));
       }
 
-      const lines = [bold('🐛 Potential bugs found'), ''];
-      for (const b of bugs) lines.push(mdt`• ${b}`);
-      lines.push('', italic('Review these manually or use /code_review for detailed analysis.'));
-
-      return reply(chatId, lines.join('\n'));
+      return reply(chatId, report.join('\n'));
     },
 
-    /** /simplfy <file> — analyze code for simplification opportunities */
-    async simplfy(chatId, args) {
-      const file = args[0];
+    /** /bug_fix <description> — analyze and propose fixes for bugs */
+    async bug_fix(chatId, args) {
+      await bot.sendTyping(chatId);
+      const description = args.join(' ').trim();
+      if (!description) {
+        return reply(chatId, mdt`Usage: /bug_fix <description of the bug>`);
+      }
+
+      // This would normally invoke the agent to generate patches
+      // For now, provide a placeholder response
+      return reply(chatId, [
+        bold('🛠 Bug Fix Proposal'),
+        '',
+        mdt`Description: ${description}`,
+        '',
+        italic('In a full implementation, this would:'),
+        '  1. Read all source files',
+        '  2. Generate edit blocks with the LLM',
+        '  3. Show diffs for approval',
+        '  4. Apply changes and rebuild',
+        '',
+        md('Run /code_review first to identify bugs.'),
+      ].join('\n'));
+    },
+
+    /** /simplify <file> — analyze code for simplification opportunities */
+    async simplify(chatId, args) {
+      const file = args.join(' ').trim();
       if (!file) {
-        return reply(chatId, mdt`Usage: /simplfy <file-path>`);
+        return reply(chatId, mdt`Usage: /simplify <file-path>`);
       }
 
       const filePath = path.join(process.cwd(), file);
@@ -1426,7 +1468,7 @@ export function createCommandHandler(ctx) {
       }
 
       const content = fs.readFileSync(filePath, 'utf8');
-      const lines = [bold('🧹 Simplification analysis: ' + md(file)), ''];
+      const linesArr = [bold('🧹 Simplification analysis: ' + md(file)), ''];
 
       // Simple heuristics for simplification
       const suggestions = [];
@@ -1434,30 +1476,32 @@ export function createCommandHandler(ctx) {
       // Check for overly long functions
       const funcMatches = content.match(/function\s+\w+\s*\([^)]*\)\s*\{/g);
       if (funcMatches && content.split('function').length > 3) {
-        suggestions.push(mdt`This file has ${funcMatches.length} function declarations — consider extracting helper functions.`);
+        suggestions.push(`Has ${funcMatches.length} functions — consider extracting helpers`);
       }
 
       // Check for duplicate code
       const lineCount = content.split('\n').length;
       if (lineCount > 100) {
-        suggestions.push(mdt`This file is ${lineCount} lines — consider splitting into smaller modules.`);
+        suggestions.push(`Is ${lineCount} lines — consider splitting`);
       }
 
       // Check for magic numbers
       const numbers = content.match(/\b\d{2,}\b/g);
       if (numbers && numbers.length > 5) {
         const unique = [...new Set(numbers)];
-        suggestions.push(mdt`Found ${unique.length} distinct numbers ≥ 100 — extract to named constants.`);
+        suggestions.push(`Found ${unique.length} numbers ≥ 100 — extract to constants`);
       }
 
       if (!suggestions.length) {
-        lines.push(mdt`No simplification opportunities detected.`);
+        linesArr.push(mdt`No simplification opportunities detected.`);
       } else {
-        lines.push('', bold('Suggestions:'));
-        for (const s of suggestions) lines.push(mdt`• ${s}`);
+        linesArr.push('', bold('Suggestions:'));
+        for (const s of suggestions) {
+          linesArr.push(mdt`• ${s}`);
+        }
       }
 
-      return reply(chatId, lines.join('\n'));
+      return reply(chatId, linesArr.join('\n'));
     },
 
     /** /verify <target> — verify system status or specific component */
