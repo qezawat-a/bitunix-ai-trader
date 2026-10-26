@@ -1129,6 +1129,394 @@ export function createCommandHandler(ctx) {
       lines.push('', italic('/memory sessions — saved, resumable sessions'));
       await reply(chatId, lines.join('\n'));
     },
+
+    // --------------------------------------------------------------- system
+
+    /** /check_system — comprehensive system health check */
+    async check_system(chatId) {
+      await bot.sendTyping(chatId);
+      const L = [bold('🩺 System Check'), ''];
+      const ok = (b) => (b ? '✅' : '❌');
+
+      // 1. Environment variables
+      L.push(bold('Environment'));
+      const envChecks = [
+        ['AI_PROVIDER', !!config.ai.provider],
+        ['DATABASE_URL', !!config.database.url],
+        ['BITUNIX_API_KEY', !!config.exchange.key],
+        ['Telegram token', !!config.telegram.token],
+      ];
+      for (const [name, val] of envChecks) {
+        L.push(mdt`${ok(val)} ${name}`);
+      }
+
+      // 2. AI providers
+      L.push('', bold('AI Providers'));
+      const providers = ai.status();
+      for (const p of providers) {
+        L.push(mdt`${ok(p.model) ? '✅' : '⚠️'} ${p.provider}: ${p.model || 'not ready'}`);
+      }
+
+      // 3. Database
+      L.push('', bold('Database'));
+      try {
+        await db.settings();
+        L.push(mdt`✅ Neon connection OK`);
+      } catch (e) {
+        L.push(mdt`❌ Neon: ${e.message}`);
+      }
+
+      // 4. Exchange
+      L.push('', bold('Exchange'));
+      try {
+        const b = await availableBalance();
+        L.push(mdt`✅ Bitunix: ${Number(b.available).toFixed(2)} USDT available`);
+      } catch (e) {
+        L.push(mdt`❌ Bitunix: ${e.message}`);
+      }
+
+      await reply(chatId, L.join('\n'));
+    },
+
+    /** connect_provider <provider> [model] — configure an AI provider */
+    async connect_provider(chatId, args) {
+      await bot.sendTyping(chatId);
+      const provider = (args[0] || '').toLowerCase();
+      const model = args[1] || 'AUTO';
+
+      if (!['openai', 'gemini', 'anthropic', 'openai_compatible', 'auto'].includes(provider)) {
+        return reply(chatId, mdt`Usage: /connect_provider <openai|gemini|anthropic|auto> [model|AUTO]`);
+      }
+
+      if (provider === 'auto') {
+        return reply(chatId, mdt`Setting provider to AUTO — the router will try every available provider.`);
+      }
+
+      const cfg = {
+        openai: { prefix: 'OPENAI_COMPATIBLE', url: 'https://api.openai.com/v1' },
+        gemini: { prefix: 'GEMINI_GOOGLE', url: 'https://generativelanguage.googleapis.com/v1beta' },
+        anthropic: { prefix: 'ANTHROPIC', url: 'https://api.anthropic.com/v1' },
+      };
+
+      const c = cfg[provider];
+      const envVar = `${c.prefix}_MODEL`;
+      await db.setSetting('ai_provider', provider, 'user');
+
+      return reply(chatId, [
+        bold(`✅ Provider set to ${provider}`),
+        '',
+        mdt`Model: ${model} (set with /set ${envVar} <model>)`,
+        mdt`URL: ${config.ai.url[provider] || c.url}`,
+        '',
+        italic(`The next request will use ${provider} with model ${model}`),
+      ].join('\n'));
+    },
+
+    /** set_model <provider> <model> — pin a specific model */
+    async set_model(chatId, args) {
+      const sub = (args[0] || '').toLowerCase();
+      const modelId = args.slice(1).join(' ');
+
+      if (!['openai', 'gemini', 'anthropic', 'auto'].includes(sub)) {
+        return reply(chatId, mdt`Usage: /set_model <openai|gemini|anthropic> <model-id>`);
+      }
+
+      if (sub === 'auto') {
+        // Reset to AUTO - clear any pinned models
+        await db.setSetting('openai_model', 'AUTO', 'user');
+        await db.setSetting('gemini_model', 'AUTO', 'user');
+        await db.setSetting('anthropic_model', 'AUTO', 'user');
+        await ai.refreshModels({ clearBlacklist: true });
+        return reply(chatId, bold('✅ Reset all models to AUTO'));
+      }
+
+      if (!modelId) {
+        return reply(chatId, mdt`Usage: /set_model ${sub} <model-id>`);
+      }
+
+      const envVar = `${sub.toUpperCase()}_MODEL`;
+      await db.setSetting(`${sub}_model`, modelId, 'user');
+
+      // Refresh models to pick up the new model
+      await ai.refreshModels({ clearBlacklist: true });
+
+      return reply(chatId, [
+        bold(`✅ Model set for ${sub}`),
+        '',
+        mdt`Model: ${modelId}`,
+        mdt`Environment: ${envVar}=${modelId}`,
+        italic('The agent will probe this model on the next request.'),
+      ].join('\n'));
+    },
+
+    /** add_soul <name> | <content> — add a new soul/identity file */
+    async add_soul(chatId, args) {
+      const joined = args.join(' ');
+      const bar = joined.indexOf('|');
+      if (bar < 0) {
+        return reply(chatId, mdt`Usage: /add_soul <name> | <content>`);
+      }
+
+      const name = joined.slice(0, bar).trim();
+      const content = joined.slice(bar + 1).trim();
+
+      if (!name || !content) {
+        return reply(chatId, mdt`Both name and content are required.`);
+      }
+
+      const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'soul';
+      const soulDir = path.join(process.cwd(), 'soul');
+      const f = path.join(soulDir, `${slug}.md`);
+
+      // Check if file already exists
+      if (fs.existsSync(f)) {
+        return reply(chatId, mdt`⚠️ File ${slug}.md already exists. Use /reload to re-read or manually edit.`);
+      }
+
+      fs.writeFileSync(f, content + '\n');
+      agent.reloadSoul?.();
+
+      return reply(chatId, mdt`✅ Saved soul/${slug}.md — the agent knows it from the next prompt.`);
+    },
+
+    /** add_skill <name> | <when> | <content> — add a new skill file */
+    async add_skill(chatId, args) {
+      const joined = args.join(' ');
+      const bars = [joined.indexOf('|'), joined.indexOf('|', joined.indexOf('|') + 1)];
+      if (bars[1] === -1) {
+        return reply(chatId, mdt`Usage: /add_skill <name> | <when> | <content>`);
+      }
+
+      const name = joined.slice(0, bars[0]).trim();
+      const when = joined.slice(bars[0] + 1, bars[1]).trim();
+      const content = joined.slice(bars[1] + 1).trim();
+
+      if (!name || !content) {
+        return reply(chatId, mdt`Both name, when clause, and content are required.`);
+      }
+
+      const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'skill';
+      const skillsDir = path.join(process.cwd(), 'soul', 'skills');
+      const f = path.join(skillsDir, `${slug}.md`);
+
+      // Check if file already exists
+      if (fs.existsSync(f)) {
+        return reply(chatId, mdt`⚠️ File ${slug}.md already exists.`);
+      }
+
+      fs.mkdirSync(skillsDir, { recursive: true });
+      fs.writeFileSync(f, `---\nname: ${name}\nwhen: ${when}\nenabled: true\n---\n\n${content}\n`);
+      agent.reloadSoul?.();
+
+      return reply(chatId, mdt`✅ Saved soul/skills/${slug}.md — the agent knows it from the next prompt.`);
+    },
+
+    /** add_mcp <name> <command> [args...] — add an MCP server config */
+    async add_mcp(chatId, args) {
+      const name = (args[0] || '').trim();
+      const command = (args[1] || '').trim();
+      const mcpArgs = args.slice(2);
+
+      if (!name || !command) {
+        return reply(chatId, mdt`Usage: /add_mcp <name> <command> [args...]`);
+      }
+
+      const mcpFile = path.join(process.cwd(), 'mcp.json');
+
+      // Read existing config or create new
+      let config_data = {};
+      if (fs.existsSync(mcpFile)) {
+        try {
+          config_data = JSON.parse(fs.readFileSync(mcpFile, 'utf8'));
+        } catch (e) {
+          config_data = { mcpServers: {} };
+        }
+      }
+
+      if (!config_data.mcpServers) config_data.mcpServers = {};
+
+      if (config_data.mcpServers[name]) {
+        return reply(chatId, mdt`⚠️ MCP server '${name}' already exists. Use /mcp reload after editing.`);
+      }
+
+      config_data.mcpServers[name] = {
+        command,
+        args: mcpArgs.length ? mcpArgs : [],
+        enabled: false,
+      };
+
+      fs.writeFileSync(mcpFile, JSON.stringify(config_data, null, 2) + '\n');
+
+      return reply(chatId, [
+        bold('✅ Added MCP server config'),
+        '',
+        mdt`Name: ${name}`,
+        mdt`Command: ${command}` + (mcpArgs.length ? `\n  Args: ${mcpArgs.join(', ')}` : ''),
+        '',
+        italic('Run /mcp reload to start it. Set enabled: true in mcp.json to auto-start.'),
+      ].join('\n'));
+    },
+
+    /** /code_review — review the current codebase for issues */
+    async code_review(chatId) {
+      await bot.sendTyping(chatId);
+
+      // Import the skill dynamically to avoid circular dependency
+      const { codehealthMcp } = await import('../skills/codehealth-mcp/index.js').catch(() => ({ codehealthMcp: null }));
+
+      if (!codehealthMcp) {
+        return reply(chatId, mdt`⚠️ Code health check not available. Run in a project with @poolside/codehealth-mcp installed.`);
+      }
+
+      try {
+        const result = await codehealthMcp();
+        return reply(chatId, result);
+      } catch (e) {
+        return reply(chatId, mdt`❌ Code review failed: ${e.message}`);
+      }
+    },
+
+    /** /bug_fixes — analyze and suggest fixes for bugs */
+    async bug_fixes(chatId) {
+      await bot.sendTyping(chatId);
+
+      const bugs = [];
+
+      // Check for common issues
+      const srcDir = path.join(process.cwd(), 'src');
+      if (fs.existsSync(srcDir)) {
+        const files = fs.readdirSync(srcDir, { recursive: true }).filter(f => f.endsWith('.js'));
+        for (const f of files) {
+          const content = fs.readFileSync(path.join(srcDir, f), 'utf8');
+
+          // Check for common bug patterns
+          if (content.includes('try {' ) && !content.includes('catch')) {
+            bugs.push(`${f}: missing catch block after try`);
+          }
+          if (content.match(/\.then\([^)]*\)\.catch\([^)]*\)\.then\(/)) {
+            bugs.push(`${f}: promise chain may swallow errors`);
+          }
+          if (content.includes('TODO') || content.includes('FIXME')) {
+            bugs.push(`${f}: contains TODO/FIXME comments`);
+          }
+        }
+      }
+
+      if (!bugs.length) {
+        return reply(chatId, bold('✅ No obvious bugs found in the codebase.'));
+      }
+
+      const lines = [bold('🐛 Potential bugs found'), ''];
+      for (const b of bugs) lines.push(mdt`• ${b}`);
+      lines.push('', italic('Review these manually or use /code_review for detailed analysis.'));
+
+      return reply(chatId, lines.join('\n'));
+    },
+
+    /** /simplfy <file> — analyze code for simplification opportunities */
+    async simplfy(chatId, args) {
+      const file = args[0];
+      if (!file) {
+        return reply(chatId, mdt`Usage: /simplfy <file-path>`);
+      }
+
+      const filePath = path.join(process.cwd(), file);
+      if (!fs.existsSync(filePath)) {
+        return reply(chatId, mdt`❌ File not found: ${file}`);
+      }
+
+      const content = fs.readFileSync(filePath, 'utf8');
+      const lines = [bold('🧹 Simplification analysis: ' + md(file)), ''];
+
+      // Simple heuristics for simplification
+      const suggestions = [];
+
+      // Check for overly long functions
+      const funcMatches = content.match(/function\s+\w+\s*\([^)]*\)\s*\{/g);
+      if (funcMatches && content.split('function').length > 3) {
+        suggestions.push(mdt`This file has ${funcMatches.length} function declarations — consider extracting helper functions.`);
+      }
+
+      // Check for duplicate code
+      const lineCount = content.split('\n').length;
+      if (lineCount > 100) {
+        suggestions.push(mdt`This file is ${lineCount} lines — consider splitting into smaller modules.`);
+      }
+
+      // Check for magic numbers
+      const numbers = content.match(/\b\d{2,}\b/g);
+      if (numbers && numbers.length > 5) {
+        const unique = [...new Set(numbers)];
+        suggestions.push(mdt`Found ${unique.length} distinct numbers ≥ 100 — extract to named constants.`);
+      }
+
+      if (!suggestions.length) {
+        lines.push(mdt`No simplification opportunities detected.`);
+      } else {
+        lines.push('', bold('Suggestions:'));
+        for (const s of suggestions) lines.push(mdt`• ${s}`);
+      }
+
+      return reply(chatId, lines.join('\n'));
+    },
+
+    /** /verify <target> — verify system status or specific component */
+    async verify(chatId, args) {
+      const target = (args[0] || '').toLowerCase();
+
+      if (!target) {
+        return reply(chatId, [
+          bold('🔍 Verify command'),
+          '',
+          md('Usage: /verify <target>'),
+          '',
+          md('Targets:'),
+          '  system — comprehensive system check',
+          '  database — Neon connection test',
+          '  exchange — Bitunix API test',
+          '  ai — AI provider connectivity',
+          '  telegram — bot functionality',
+        ].join('\n'));
+      }
+
+      if (target === 'system') {
+        return commands.check_system(chatId);
+      }
+
+      if (target === 'database') {
+        try {
+          await db.settings();
+          return reply(chatId, bold('✅ Database connection verified.'));
+        } catch (e) {
+          return reply(chatId, mdt`❌ Database: ${e.message}`);
+        }
+      }
+
+      if (target === 'exchange') {
+        try {
+          const b = await availableBalance();
+          return reply(chatId, mdt`✅ Exchange: ${Number(b.available).toFixed(2)} USDT available`);
+        } catch (e) {
+          return reply(chatId, mdt`❌ Exchange: ${e.message}`);
+        }
+      }
+
+      if (target === 'ai') {
+        const st = ai.status();
+        const allOk = st.every(p => p.model);
+        return reply(chatId, allOk
+          ? bold('✅ AI: All providers ready')
+          : mdt`⚠️ AI: Some providers not ready — ${st.filter(p => !p.model).map(p => p.provider).join(', ')}`);
+      }
+
+      if (target === 'telegram') {
+        return reply(chatId, bot.degraded
+          ? mdt`❌ Telegram: ${bot.degradedReason || 'degraded'}`
+          : bold('✅ Telegram: functional'));
+      }
+
+      return reply(chatId, mdt`Unknown verify target: ${target}`);
+    },
   };
 
   /** Entry point for every incoming Telegram message. */
