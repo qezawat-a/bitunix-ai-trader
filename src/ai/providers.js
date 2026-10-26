@@ -456,7 +456,7 @@ function parseMaybeSse(rawText, ct) {
   return null;
 }
 
-class OpenAICompatible extends Provider {
+export class OpenAICompatible extends Provider {
   get envVar() { return 'OPENAI_COMPATIBLE_MODEL'; }
 
   async listModels() {
@@ -553,7 +553,7 @@ class OpenAICompatible extends Provider {
 
 // ------------------------------------------------------------------ Gemini
 
-class Gemini extends Provider {
+export class Gemini extends Provider {
   get envVar() { return 'GEMINI_GOOGLE_MODEL'; }
 
   async listModels() {
@@ -624,7 +624,7 @@ class Gemini extends Provider {
 
 // --------------------------------------------------------------- Anthropic
 
-class Anthropic extends Provider {
+export class Anthropic extends Provider {
   get envVar() { return 'ANTHROPIC_MODEL'; }
 
   async listModels() {

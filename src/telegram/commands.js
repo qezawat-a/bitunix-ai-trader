@@ -285,19 +285,11 @@ export function createCommandHandler(ctx) {
       const st = ai.status();
       const lines = [bold('🤖 Models'), ''];
       for (const p of st) {
-        lines.push(mdt`  ${p.provider}: ${p.model} (${p.available ? 'available' : 'unavailable'})`);
+        lines.push(mdt`  ${p.provider}: ${p.model} (${p.model && p.model !== '(not resolved yet)' ? 'ready' : 'not ready'})`);
       }
       await reply(chatId, lines.join('\\n'));
     },
 
-    async set_model(chatId, args) {
-      const parts = (args || []).join(' ').trim().split(/\\s+/);
-      if (parts.length < 2) {
-        await reply(chatId, mdt`Usage: /set_model <provider> <model>`);
-        return;
-      }
-      await reply(chatId, mdt`Model set: ${parts[0]} → ${parts[1]}. (Restart may be needed)`);
-    },
 
 
     async mcp(chatId) {
@@ -1502,8 +1494,20 @@ export function createCommandHandler(ctx) {
         return reply(chatId, bold('Setting provider to AUTO — the router will try every available provider.'));
       }
 
-      const p = ai.providers.find((x) => x.name === provider);
-      if (!p) return reply(chatId, mdt`Unknown provider ${provider}`);
+      let p = ai.providers.find((x) => x.name === provider);
+      if (!p) {
+        // Provider not yet enabled (no key). Create it on the fly.
+        const cfgMap = {
+          openai: config.ai.openai,
+          gemini: config.ai.gemini,
+          anthropic: config.ai.anthropic,
+        };
+        const Ctor = provider === 'gemini' ? (await import('../ai/providers.js')).Gemini
+          : provider === 'anthropic' ? (await import('../ai/providers.js')).Anthropic
+          : (await import('../ai/providers.js')).OpenAICompatible;
+        p = new Ctor(provider, cfgMap[provider]);
+        ai.providers.push(p);
+      }
 
       if (apiKey) p.cfg.key = apiKey;
       if (baseUrl) p.cfg.url = baseUrl.replace(/\/+$/, '');
@@ -1560,15 +1564,16 @@ export function createCommandHandler(ctx) {
       const envVar = `${sub.toUpperCase()}_MODEL`;
       await db.setSetting(`${sub}_model`, modelId, 'user');
 
-      // Refresh models to pick up the new model
-      await ai.refreshModels({ clearBlacklist: true });
+      // Pin + probe the model on the live router
+      const st = await ai.setModel(sub, modelId);
+      const p = st.find((x) => x.provider === sub);
 
       return reply(chatId, [
         bold(`✅ Model set for ${sub}`),
         '',
-        mdt`Model: ${modelId}`,
+        mdt`Model: ${p?.model || modelId}`,
         mdt`Environment: ${envVar}=${modelId}`,
-        italic('The agent will probe this model on the next request.'),
+        italic('Live — takes effect immediately.'),
       ].join('\n'));
     },
 
