@@ -1518,7 +1518,7 @@ export function createCommandHandler(ctx) {
         bold(`✅ Provider set to ${provider}`),
         '',
         mdt`Model: ${model} (set with /set ${envVar} <model>)`,
-        mdt`URL: ${config.ai.url[provider] || c.url}`,
+        mdt`URL: ${c.url}`,
         '',
         italic(`The next request will use ${provider} with model ${model}`),
       ].join('\n'));
