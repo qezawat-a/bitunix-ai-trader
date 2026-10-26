@@ -152,7 +152,9 @@ export async function openFromSignal(signal, { aiVerdict = null, marginOverride 
     return { ok: false, reason: `already in ${signal.side} on ${symbol}` };
   }
 
-  const marginUsdt = marginOverride != null
+  // `let` (not `const`): the liquidation-aware sizing block below may floor this
+  // up to the exchange minimum order size (minMarginForMinOrder).
+  let marginUsdt = marginOverride != null
     ? Number(marginOverride)
     : computeMargin({
       available: bal.available,
