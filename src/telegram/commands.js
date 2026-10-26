@@ -299,11 +299,6 @@ export function createCommandHandler(ctx) {
       await reply(chatId, mdt`Model set: ${parts[0]} → ${parts[1]}. (Restart may be needed)`);
     },
 
-    async connect_provider(chatId, args) {
-      const name = (args || []).join(' ').trim();
-      if (!name) { await reply(chatId, mdt`Usage: /connect_provider <name>`); return; }
-      await reply(chatId, mdt`Provider ${name}: check .env for API key configuration.`);
-    },
 
     async mcp(chatId) {
       const ms = mcpStatus();
@@ -1454,7 +1449,7 @@ export function createCommandHandler(ctx) {
       L.push(bold('Environment'));
       const envChecks = [
         ['AI_PROVIDER', !!config.ai.provider],
-        ['DATABASE_URL', !!config.database.url],
+        ['DATABASE_URL', !!config.db.url],
         ['BITUNIX_API_KEY', !!config.exchange.key],
         ['Telegram token', !!config.telegram.token],
       ];
@@ -1494,33 +1489,49 @@ export function createCommandHandler(ctx) {
     async connect_provider(chatId, args) {
       await bot.sendTyping(chatId);
       const provider = (args[0] || '').toLowerCase();
-      const model = args[1] || 'AUTO';
+      const apiKey = args[1];
+      const baseUrl = args[2];
+      const model = args[3] || 'AUTO';
 
-      if (!['openai', 'gemini', 'anthropic', 'openai_compatible', 'auto'].includes(provider)) {
-        return reply(chatId, mdt`Usage: /connect_provider <openai|gemini|anthropic|auto> [model|AUTO]`);
+      if (!['openai', 'gemini', 'anthropic', 'auto'].includes(provider)) {
+        return reply(chatId, mdt`Usage: /connect_provider <openai|gemini|anthropic|auto> <api_key> <base_url> [model]`);
       }
 
       if (provider === 'auto') {
-        return reply(chatId, mdt`Setting provider to AUTO — the router will try every available provider.`);
+        await db.setSetting('ai_provider', 'AUTO', 'user');
+        return reply(chatId, bold('Setting provider to AUTO — the router will try every available provider.'));
       }
 
-      const cfg = {
-        openai: { prefix: 'OPENAI_COMPATIBLE', url: 'https://api.openai.com/v1' },
-        gemini: { prefix: 'GEMINI_GOOGLE', url: 'https://generativelanguage.googleapis.com/v1beta' },
-        anthropic: { prefix: 'ANTHROPIC', url: 'https://api.anthropic.com/v1' },
-      };
+      const p = ai.providers.find((x) => x.name === provider);
+      if (!p) return reply(chatId, mdt`Unknown provider ${provider}`);
 
-      const c = cfg[provider];
-      const envVar = `${c.prefix}_MODEL`;
+      if (apiKey) p.cfg.key = apiKey;
+      if (baseUrl) p.cfg.url = baseUrl.replace(/\/+$/, '');
+      if (model && model.toUpperCase() !== 'AUTO') {
+        try {
+          const verdict = await p.probe(model);
+          if (!verdict.ok) return reply(chatId, mdt`❌ ${provider}/${model} not usable: ${verdict.reason}`);
+          p.cfg.model = model;
+          p.model = model;
+        } catch (e) {
+          return reply(chatId, mdt`❌ probe failed: ${e.message}`);
+        }
+      } else {
+        p.cfg.model = 'AUTO';
+        p.model = null;
+        await p.ready().catch(() => {});
+      }
+      ai.active = p;
       await db.setSetting('ai_provider', provider, 'user');
 
       return reply(chatId, [
-        bold(`✅ Provider set to ${provider}`),
+        bold(`✅ Provider connected: ${provider}`),
         '',
-        mdt`Model: ${model} (set with /set ${envVar} <model>)`,
-        mdt`URL: ${c.url}`,
+        mdt`Key: ${apiKey ? 'set (' + apiKey.slice(0, 6) + '…)' : 'unchanged'}`,
+        mdt`URL: ${p.cfg.url}`,
+        mdt`Model: ${p.model || '(auto-resolving)'}`,
         '',
-        italic(`The next request will use ${provider} with model ${model}`),
+        italic('Live config updated — takes effect immediately for the next request.'),
       ].join('\n'));
     },
 
