@@ -280,6 +280,7 @@ export class BitunixClient {
       qty: String(params.qty),
       side: params.side,
       orderType: params.orderType || 'MARKET',
+      ...(params.minOrderNotional ? { minOrderNotional: String(params.minOrderNotional) } : {}),
     };
     if (params.price !== undefined) body.price = String(params.price);
     if (params.tradeSide) body.tradeSide = params.tradeSide;
@@ -289,13 +290,13 @@ export class BitunixClient {
     if (params.reduceOnly !== undefined) body.reduceOnly = Boolean(params.reduceOnly);
     if (params.tpPrice !== undefined) {
       body.tpPrice = String(params.tpPrice);
-      body.tpStopType = params.tpStopType || 'MARK_PRICE';
+      body.tpStopType = params.tpStopType || 'LAST_PRICE';
       body.tpOrderType = params.tpOrderType || 'MARKET';
       if (body.tpOrderType === 'LIMIT') body.tpOrderPrice = String(params.tpOrderPrice ?? params.tpPrice);
     }
     if (params.slPrice !== undefined) {
       body.slPrice = String(params.slPrice);
-      body.slStopType = params.slStopType || 'MARK_PRICE';
+      body.slStopType = params.slStopType || 'LAST_PRICE';
       body.slOrderType = params.slOrderType || 'MARKET';
       if (body.slOrderType === 'LIMIT') body.slOrderPrice = String(params.slOrderPrice ?? params.slPrice);
     }

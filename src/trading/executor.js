@@ -300,19 +300,23 @@ export async function openFromSignal(signal, { aiVerdict = null, marginOverride 
   const isLong = signal.side === 'LONG';
   const clientId = `aria${Date.now().toString(36)}`;
 
+  // Calculate minOrderNotional: minimum order value (qty × price) that the exchange requires
+  const minOrderNotional = minQty * price;
+
   const order = {
     symbol,
     qty,
     side: isLong ? 'BUY' : 'SELL',
     orderType: 'MARKET',
     clientId,
+    minOrderNotional,
     slPrice,
-    slStopType: 'MARK_PRICE',
+    slStopType: 'LAST_PRICE',
     slOrderType: 'MARKET',
   };
   if (tpPrice != null) {
     order.tpPrice = tpPrice;
-    order.tpStopType = 'MARK_PRICE';
+    order.tpStopType = 'LAST_PRICE';
     order.tpOrderType = 'MARKET';
   }
   if (String(s.position_mode).toUpperCase() === 'HEDGE') order.tradeSide = 'OPEN';
