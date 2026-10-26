@@ -48,8 +48,14 @@ export function resetGuardState() {
  */
 export function positionRoi(p) {
   const pnl = Number(p.unrealizedPNL || 0);
-  const leverage = Number(p.leverage || 1);
-  const notional = Number(p.notional || (Number(p.qty || 0) * Number(p.avgOpenPrice || 0)));
+  // entryValue is Bitunix's own notional figure; prefer it over the derived
+  // qty*avgOpenPrice which drifts on part-closed positions. Fall back to the
+  // derived figure, then to p.notional if a caller set it explicitly.
+  const notional = Number(p.entryValue || p.notional || (Number(p.qty || 0) * Number(p.avgOpenPrice || 0)));
+  // Default to configured leverage when the position row omits it (cross mode
+  // rows sometimes do), rather than 0 — otherwise ROI silently collapses to 0
+  // and breakeven/trailing never arm.
+  const leverage = Number(p.leverage || p.configuredLeverage || 1);
   const margin = Number(p.margin || 0);
 
   // Primary path: notional + leverage works for both cross and isolated margin
@@ -67,21 +73,31 @@ export function positionRoi(p) {
 
 export async function livePositions() {
   const ps = await bitunix.getPendingPositions();
-  return (ps || []).map((p) => ({
-    ...p,
-    roi: positionRoi(p),
-    // get_pending_positions returns `entryValue` — the exchange's own notional
-    // figure (PositionPendingResp.entryValue). Prefer it over deriving from
-    // qty x avgOpenPrice, which drifts once the position is part-closed and the
-    // average entry no longer matches the live size. The derivation stays as
-    // the fallback for rows that predate the field or come from the WS push.
-    notional: Number(p.entryValue || (Number(p.qty || 0) * Number(p.avgOpenPrice || 0))),
-    unrealizedPNL: Number(p.unrealizedPNL || 0),
-    qty: Number(p.qty || 0),
-    margin: Number(p.margin || 0),
-    avgOpenPrice: Number(p.avgOpenPrice || 0),
-    leverage: Number(p.leverage || 0),
-  }));
+  return (ps || []).map((p) => {
+    const notional = Number(p.entryValue || (Number(p.qty || 0) * Number(p.avgOpenPrice || 0)));
+    const leverage = Number(p.leverage || 0);
+    const enriched = {
+      ...p,
+      // get_pending_positions returns `entryValue` — the exchange's own notional
+      // figure (PositionPendingResp.entryValue). Prefer it over deriving from
+      // qty x avgOpenPrice, which drifts once the position is part-closed and
+      // the average entry no longer matches the live size. The derivation stays
+      // as the fallback for rows that predate the field or come from the WS push.
+      notional,
+      unrealizedPNL: Number(p.unrealizedPNL || 0),
+      qty: Number(p.qty || 0),
+      margin: Number(p.margin || 0),
+      avgOpenPrice: Number(p.avgOpenPrice || 0),
+      leverage,
+      // Carry the configured leverage so positionRoi can fall back to it when
+      // the exchange row omits the field (cross-mode rows sometimes do).
+      configuredLeverage: Number(settings().leverage || config.defaults.leverage || 1),
+    };
+    // Compute ROI AFTER the notional override so it uses entryValue, not the
+    // derived qty*avgOpenPrice that drifts on part-closed positions.
+    enriched.roi = positionRoi(enriched);
+    return enriched;
+  });
 }
 
 /**
@@ -422,11 +438,18 @@ export async function portfolioSnapshot() {
   if (!positions.length) return { count: 0, totalPnl: 0, totalMargin: 0, roi: 0, positions: [] };
   const totalPnl = positions.reduce((a, p) => a + p.unrealizedPNL, 0);
   const totalMargin = positions.reduce((a, p) => a + p.margin, 0);
+  // In cross mode p.margin is total account margin, so use notional/leverage
+  // per position for a meaningful ROI instead of diluting to ~0.
+  const totalNotional = positions.reduce((a, p) => a + (p.notional || 0), 0);
+  const avgLeverage = positions.reduce((a, p) => a + (p.leverage || 0), 0) / (positions.length || 1);
+  const roi = (totalNotional > 0 && avgLeverage > 0)
+    ? (totalPnl * avgLeverage / totalNotional) * 100
+    : (totalMargin ? (totalPnl / totalMargin) * 100 : 0);
   return {
     count: positions.length,
     totalPnl,
     totalMargin,
-    roi: totalMargin ? (totalPnl / totalMargin) * 100 : 0,
+    roi,
     positions,
   };
 }

@@ -662,11 +662,17 @@ export async function upsertPositionTpSl({ symbol, positionId, tpPrice, slPrice,
 }
 
 async function positionQtyOf(symbol, positionId) {
-  try {
-    const ps = await bitunix.getPendingPositions({ symbol });
-    const p = (Array.isArray(ps) ? ps : []).find((x) => String(x.positionId) === String(positionId));
-    return p ? p.qty : null;
-  } catch { return null; }
+  // Retry once on failure — this is the safety net after a failed modify,
+  // so silently returning null means no stop at all on the position.
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const ps = await bitunix.getPendingPositions({ symbol });
+      const p = (Array.isArray(ps) ? ps : []).find((x) => String(x.positionId) === String(positionId));
+      if (p && p.qty != null) return Number(p.qty);
+    } catch { /* retry */ }
+    if (attempt === 0) await new Promise((r) => setTimeout(r, 350));
+  }
+  return null;
 }
 
 /** Reversal: flatten the current side and immediately open the opposite one. */
