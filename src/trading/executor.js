@@ -1,7 +1,7 @@
 import bitunix from '../exchange/bitunix.js';
 import { createLogger } from '../logger.js';
 import { orderGotFill, orderRejected } from '../exchange/errors.js';
-import { computeDynamicTpSl, computeMargin } from './risk.js';
+import { computeDynamicTpSl, computeMargin, minOrderNotional, minMarginForMinOrder } from './risk.js';
 import { applyPartialTpSl, entryMethod, mostProtectiveStopRow } from './tpsl.js';
 import {
   settings, openTrade, attachPositionId, logEvent, setCooldown, remember,
@@ -300,8 +300,8 @@ export async function openFromSignal(signal, { aiVerdict = null, marginOverride 
   const isLong = signal.side === 'LONG';
   const clientId = `aria${Date.now().toString(36)}`;
 
-  // Calculate minOrderNotional: minimum order value (qty × price) that the exchange requires
-  const minOrderNotional = minQty * price;
+  // Calculate minOrderNotional: minimum order value (base qty × price) that the exchange requires
+  const minOrderNotionalValue = minQty * price;
 
   const order = {
     symbol,
@@ -309,7 +309,7 @@ export async function openFromSignal(signal, { aiVerdict = null, marginOverride 
     side: isLong ? 'BUY' : 'SELL',
     orderType: 'MARKET',
     clientId,
-    minOrderNotional,
+    minOrderNotional: minOrderNotionalValue,
     slPrice,
     slStopType: 'LAST_PRICE',
     slOrderType: 'MARKET',
