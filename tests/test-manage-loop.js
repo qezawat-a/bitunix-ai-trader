@@ -375,6 +375,53 @@ async function test() {
   setCentre(10000);
   await setSetting('trailing_method', 'ATR', 'test');
 
+  console.log('\nAn empty TP/SL read does NOT displace breakeven/trailing');
+  // The rescue branch used to `continue` after attaching, so every pass whose
+  // pending-TP/SL read came back EMPTY re-attached a wide ATR round bracket and
+  // never reached step 2 — breakeven and trailing became unreachable while the
+  // read stayed empty. With the win in the book at ROI 30%, one pass must both
+  // attach the bracket and trail the stop, in that order.
+  pendingBook = [];   // the exchange reports nothing, as far as this pass knows
+  livePos = [mkPos({ unrealizedPNL: 1.2, markPrice: 10200, leverage: 25, liqPrice: 9600 })];
+  reset();
+  writes = [];
+  const rescueAndTrail = await pass();
+  assert(rescueAndTrail.actions.some((a) => a.type === 'tpsl_attached'),
+    'the naked-position bracket was attached');
+  assert(rescueAndTrail.actions.some((a) => a.type === 'stop_moved'),
+    'the same pass also moved the stop into breakeven/trailing');
+  assert(writes.length >= 2, `both writes happened (${writes.length})`);
+  if (writes.length >= 2) {
+    assert(writes[writes.length - 1].slPrice > 10000,
+      `the final stop locks in profit (${writes[writes.length - 1].slPrice})`);
+  }
+
+  console.log('\nA failed execution-TF candle fetch no longer kills the guard');
+  // If the 1m kline fails, `atr` is null — but the structure-TF ATR the
+  // trailing engine actually consumes (stopPick.atr) comes from candles that
+  // still work. The guard must use it. ESM exports cannot be reassigned, so
+  // the seam is bitunix.getKline, which scanner.getCandles reads under.
+  {
+    const klineStub = bitunix.getKline;
+    try {
+      bitunix.getKline = async ({ interval } = {}) => {
+        if (String(interval) === '1m') throw new Error('1m fetch failed on purpose');
+        return klineStub({ symbol: 'BTCUSDT', interval });
+      };
+      resetKlineCache();
+      pendingBook = [{ tpPrice: 12000, slPrice: 9900 }];
+      livePos = [mkPos({ unrealizedPNL: 1.2, markPrice: 10200, leverage: 25, liqPrice: 9600 })];
+      reset();
+      writes = [];
+      const degradedAtr = await pass();
+      assert(degradedAtr.actions.some((a) => a.type === 'stop_moved'),
+        'breakeven/trailing ran on the structure-TF ATR');
+    } finally {
+      bitunix.getKline = klineStub;
+      resetKlineCache();
+    }
+  }
+
   console.log('\nbreakevenStop is the same floor trailingStop uses');
   // The two must never diverge: trailingStop() is the ATR family's floor, and
   // the RATIO/INTERVAL families now share it. Asserting them equal means a

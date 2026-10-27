@@ -1,7 +1,7 @@
 import bitunix from '../exchange/bitunix.js';
 import { config } from '../config.js';
 import { createLogger } from '../logger.js';
-import { trailingStop, breakevenStop, computeDynamicTpSl } from './risk.js';
+import { trailingStop, breakevenStop, computeDynamicTpSl, stopAtrFor } from './risk.js';
 import {
   trailingStep, resetTrailing, trailingSnapshot, evaluateAccountTpSl, closeEverything,
   mostProtectiveStopRow,
@@ -288,11 +288,28 @@ export async function manageOpenPositions({ notify = null } = {}) {
         await notify(`🛡 *TP/SL attached* — ${p.symbol} ${p.side}\nTP ${synth.tpPrice.toPrecision(8)} | SL ${synth.slPrice.toPrecision(8)}  (${synth.explain})`
           + (synth.liqAdjusted ? `\n⚠️ stop pulled inside liquidation (${Number(p.liqPrice).toPrecision(8)}) — ${p.leverage}x is too high for this ATR` : ''));
       }
-      continue;
+      // BUG FIX: this used to `continue`, dropping straight to the next
+      // position. On any pass whose pending-TP/SL read came back EMPTY while
+      // an entry-order bracket in fact existed (rows without a bound
+      // positionId, a lagging write, a rejected place), the rescue re-attached
+      // a wide ATR stop and the breakeven/trailing step below was NEVER
+      // reached — which read to the user exactly as "breakeven and trailing
+      // died". Fall through instead: the ratchet below only writes again when
+      // the protection level is an improvement, so a fresh bracket plus a
+      // breakeven/trailing move in the SAME pass is always at worst neutral.
     }
 
     // 2) breakeven + trailing
-    if (atr && p.roi > 0) {
+    // TRAILING SCALES TO THE EXECUTION-TF (1m) ATR — the reverse of the
+    // entry bracket. The structure-TF ATR is 2-3x larger, so with it the
+    // trail distance is wider than the move since breakeven: the ATR trail
+    // always fell BELOW the breakeven floor and never overrode it — the
+    // stop parked at breakeven "forever" even at 36% ROI (measured live).
+    // The gate falls back to the structure-TF ATR only when the 1m fetch
+    // fails, so a dead candlefeed cannot silently kill breakeven/trailing.
+    const stopPick = Number(atr) > 0 ? null : stopAtrFor({ atr, timeframes: tframes }, s);
+    const guardAtr = (Number(atr) > 0 ? atr : stopPick?.atr) || null;
+    if (guardAtr > 0 && p.roi > 0) {
       // method 3: two trailing families.
       //   ATR              — the original: breakeven, then a stop N ATR behind.
       //   RATIO / INTERVAL — the exchange's own semantics (help centre id=290):
@@ -307,14 +324,9 @@ export async function manageOpenPositions({ notify = null } = {}) {
       if (tm === 'ATR') {
         trail = trailingStop({
           side: p.side, entry: Number(p.avgOpenPrice), currentPrice: price,
-          // Use the execution-TF (1m) ATR for trailing, NOT the structure-TF
-          // ATR from stopAtrFor. The structure-TF ATR (3m/5m/15m) is 2-3x
-          // larger, making the trailing distance (atr * k) wider than the price
-          // move since breakeven — the ATR trail always falls below breakeven
-          // and never overrides it, so the stop sits at breakeven forever.
-          // The execution-TF ATR keeps the trailing stop tight enough to lock
-          // in profit ahead of breakeven.
-          atr, roiPct: p.roi, leverage: Number(p.leverage),
+          // execution-TF ATR (see the gate comment above): structure-TF
+          // sizing here is what left the stop parked at breakeven forever.
+          atr: guardAtr, roiPct: p.roi, leverage: Number(p.leverage),
           // the exchange's own liquidation price — authoritative, unlike an estimate
           liqPrice: Number(p.liqPrice) || null,
         });
