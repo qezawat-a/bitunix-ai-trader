@@ -292,7 +292,12 @@ export async function manageOpenPositions({ notify = null } = {}) {
     }
 
     // 2) breakeven + trailing
-    if (atr && p.roi > 0) {
+    // Gate on ROI, not ATR: breakeven doesn't need ATR, and requiring it means a
+    // transient candle fetch failure leaves a winner with NO stop at all while
+    // the exchange's original wide stop sits untouched. The ATR family's trailing
+    // branch inside trailingStop() returns null when atr is falsy, so a null ATR
+    // degrades breakeven-only — that is the safe direction.
+    if (p.roi > 0) {
       // method 3: two trailing families.
       //   ATR              — the original: breakeven, then a stop N ATR behind.
       //   RATIO / INTERVAL — the exchange's own semantics (help centre id=290):
