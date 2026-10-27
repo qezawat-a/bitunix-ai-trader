@@ -112,6 +112,50 @@ export function resetSymbolConfigCache() {
   positionModeApplied = null;
 }
 
+/**
+ * Set the exchange's held leverage for a symbol and VERIFY it by reading back.
+ *
+ * change_leverage answering code 0 is not proof — the read-back is. The doc's
+ * own response carries the applied value ({leverage: 12}), so that is trusted
+ * first and get_leverage_margin_mode is the fallback cross-check.
+ *
+ * The cache is NOT updated with the requested value: caching a value that was
+ * merely requested is what once made every entry re-issue change_leverage
+ * (see ensureSymbolConfig). Only a verified held value goes in.
+ *
+ * Returns the verified held leverage, or null when it could not be confirmed.
+ */
+async function syncExchangeLeverage(symbol, wantLev, marginMode) {
+  try {
+    const res = await bitunix.changeLeverage({ symbol, leverage: wantLev });
+    const row = Array.isArray(res) ? res[0] : res;
+    const applied = Number(row?.leverage);
+    if (applied > 0) {
+      leverageApplied.set(symbol, { leverage: applied, marginMode });
+      if (applied !== wantLev) {
+        log.warn(`${symbol}: change_leverage answered ${applied}x for a request of ${wantLev}x`);
+      }
+      return applied;
+    }
+  } catch (e) {
+    // NOT immediately fatal: the exchange may already hold this value, and a
+    // "position exists, leverage cannot change" class of error must not stop
+    // an honest read-back from deciding what we really hold.
+    log.warn(`${symbol}: change_leverage(${wantLev}) failed: ${e.message}`);
+  }
+  try {
+    const back = await bitunix.getLeverageAndMarginMode(symbol);
+    const held = Number(back?.leverage);
+    if (held > 0) {
+      leverageApplied.set(symbol, { leverage: held, marginMode });
+      return held;
+    }
+  } catch (e) {
+    log.warn(`${symbol}: leverage read-back failed: ${e.message}`);
+  }
+  return null;
+}
+
 /** Available USDT (available + cross unrealised PnL, per docs note). */
 export async function availableBalance() {
   const acc = await bitunix.getAccount();
@@ -233,11 +277,38 @@ export async function openFromSignal(signal, { aiVerdict = null, marginOverride 
     marginUsdt = Math.max(marginUsdt, minMargin);
   }
 
-  // Keep the leverage the exchange holds equal to the one used for sizing.
-  if (leverage !== configuredLeverage) {
-    leverageAdjustmentReason = leverage < configuredLeverage
-      ? 'clamped to the ATR stop liquidation ceiling for ' + symbol + ' (configured ' + configuredLeverage + 'x)'
-      : 'exchange holds ' + leverage + 'x for ' + symbol + ' (configured ' + configuredLeverage + 'x)';
+  // --- BUG FIX (2026-10-26, measured live on BEAMXUSDT) ----------------------
+  // The clamp above changed ONLY the local `leverage` used for sizing.
+  // ensureSymbolConfig() had already left the exchange holding the CONFIGURED
+  // leverage (50x), and nothing told the exchange to move to the clamped value
+  // (40x). The position really opened at 50x while the fill message, the trade
+  // record and the margin math all claimed 40x (margin 0.08 vs the real
+  // notional/50), and the ATR stop sat almost on top of the liquidation price
+  // the ceiling was computed to avoid.
+  //
+  // So: make the exchange hold the leverage we sized at, prove it with a
+  // read-back, and size off the verified value. If the exchange refuses the
+  // safe value there is nothing honest to size against — refuse the trade.
+  if (Number(leverage) !== Number(exchangeLeverage)) {
+    const wantMargin = String(s.margin_mode).toUpperCase() === 'ISOLATED'
+      ? 'ISOLATION' : String(s.margin_mode).toUpperCase();
+    const held = await syncExchangeLeverage(symbol, leverage, wantMargin);
+    if (held == null) {
+      return {
+        ok: false,
+        reason: `${symbol}: the ATR stop needs ${leverage}x but the exchange's held leverage could not be verified — refusing to open on unverified leverage`,
+      };
+    }
+    if (Number(held) !== Number(leverage)) {
+      return {
+        ok: false,
+        reason: `${symbol}: the ATR stop needs ${leverage}x so liquidation stays behind it, `
+          + `but the exchange holds ${held}x and refused the change — lower /set leverage for this symbol`,
+      };
+    }
+    leverageAdjustmentReason = leverage !== configuredLeverage
+      ? `applied ${leverage}x on the exchange for ${symbol} (configured ${configuredLeverage}x)`
+      : null;
   }
 
 
