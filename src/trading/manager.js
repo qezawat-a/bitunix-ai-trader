@@ -1,7 +1,7 @@
 import bitunix from '../exchange/bitunix.js';
 import { config } from '../config.js';
 import { createLogger } from '../logger.js';
-import { trailingStop, breakevenStop, computeDynamicTpSl, stopAtrFor } from './risk.js';
+import { trailingStop, breakevenStop, computeDynamicTpSl } from './risk.js';
 import {
   trailingStep, resetTrailing, trailingSnapshot, evaluateAccountTpSl, closeEverything,
   mostProtectiveStopRow,
@@ -207,10 +207,10 @@ export async function manageOpenPositions({ notify = null } = {}) {
       price = I.last(candles.map((c) => c.close));
     } catch {}
 
-    // Per-TF ATRs, so the guard sizes stops with the SAME structure-TF policy
-    // as the executor (stopAtrFor). Trailing on the execution-TF ATR was
-    // fee-band too: "trailing 0.5 ATR" of a 1m bar is a fraction of a cent of
-    // price — tighter than the round trip it is supposed to trail.
+    // Per-TF ATRs for the rescue-attachment path — same structure-TF policy
+    // as the executor (stopAtrFor). Trailing uses the execution-TF ATR directly
+    // instead: the structure-TF ATR is 2-3x larger and makes the trailing stop
+    // fall behind breakeven so it never activates.
     let tframes = {};
     for (const t of String(s.timeframes || config.defaults.timeframes).split(',').map((x) => x.trim()).filter(Boolean)) {
       try {
@@ -219,8 +219,6 @@ export async function manageOpenPositions({ notify = null } = {}) {
         if (Number.isFinite(a) && a > 0) tframes[t] = { atr: a };
       } catch {}
     }
-    const stopPick = stopAtrFor({ atr, timeframes: tframes }, s);
-
     // 0) software stop: the exchange refused to move the SL earlier, so enforce
     //    the wanted level ourselves. Without this a winner reverses into a loss
     //    while the original wide stop sits untouched.
@@ -309,9 +307,14 @@ export async function manageOpenPositions({ notify = null } = {}) {
       if (tm === 'ATR') {
         trail = trailingStop({
           side: p.side, entry: Number(p.avgOpenPrice), currentPrice: price,
-          // structure-TF ATR (stopAtrFor): trailing on the 1m bar is
-          // fee-band — the stop barely ratchets and hands the win back.
-          atr: stopPick?.atr || atr, roiPct: p.roi, leverage: Number(p.leverage),
+          // Use the execution-TF (1m) ATR for trailing, NOT the structure-TF
+          // ATR from stopAtrFor. The structure-TF ATR (3m/5m/15m) is 2-3x
+          // larger, making the trailing distance (atr * k) wider than the price
+          // move since breakeven — the ATR trail always falls below breakeven
+          // and never overrides it, so the stop sits at breakeven forever.
+          // The execution-TF ATR keeps the trailing stop tight enough to lock
+          // in profit ahead of breakeven.
+          atr, roiPct: p.roi, leverage: Number(p.leverage),
           // the exchange's own liquidation price — authoritative, unlike an estimate
           liqPrice: Number(p.liqPrice) || null,
         });
