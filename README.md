@@ -53,6 +53,57 @@ Neon connection and your AI keys *before* real money is at stake.
 
 ---
 
+## Deploying
+
+The agent is a worker: it polls Telegram and the exchange and holds websockets
+open. Anywhere that runs `npm start` and keeps the process alive works — a
+VPS under `systemd`/`pm2`, Railway, Render, Fly.
+
+### The database transport is detected, not configured
+
+The one thing that differs between a laptop and a host is how the database
+wants to be spoken to, and the URL does not reliably say. A private Postgres
+(`postgres.railway.internal`, a compose service, `10.x`) speaks plain TCP and
+hangs up on a TLS handshake with `The server does not support SSL
+connections`. A managed one (Neon, Supabase, RDS) requires TLS but presents a
+certificate that the container has no root for.
+
+So on boot the agent performs the Postgres `SSLRequest` handshake against your
+server, uses whatever it answers, and re-negotiates if it still guessed wrong.
+`?sslmode=require` copied from someone else's example onto a private host is
+overridden, with a warning, instead of crashing the deploy.
+
+Override it only if you need to:
+
+```bash
+DATABASE_SSL=disable        # or require / verify-full  (PGSSLMODE works too)
+DB_CONNECT_ATTEMPTS=10      # boot retries — private networking needs a moment
+DB_CONNECT_TIMEOUT_MS=15000
+DB_POOL_MAX=5
+```
+
+`verify-ca` / `verify-full` are the exception: a stated security requirement is
+never downgraded automatically, so a mismatch there fails loudly by design.
+
+If the database is the thing that will not come up:
+
+```bash
+npm run db:check            # DNS -> TCP -> TLS -> auth -> grants; no other keys needed
+```
+
+### Railway
+
+1. **New Project → Deploy from GitHub repo**, pick this repo.
+2. **Add a database.** Either Railway's own (*New → Database → PostgreSQL*) or
+   an external Neon URL — both work unchanged.
+3. **Wire the variable.** On the *app* service → **Variables** → add a reference
+   to the Postgres service's `DATABASE_URL`. A variable on the database service
+   is not visible to the app unless referenced.
+4. **Redeploy.** Variables are applied at deploy time.
+5. If you set `PORT` (Railway does), the agent serves `GET /health` on it, so the
+   platform sees a live worker instead of restarting one that never binds a port.
+
+
 ## Configuration
 
 Everything in `.env` is only a **seed**. The live values live in Neon
