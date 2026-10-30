@@ -53,7 +53,7 @@ ok(`${redactUrl(url)} (from ${source})`);
 const t = parseTarget(url);
 const policy = sslPolicy(url);
 note(`host ${t.host}:${t.port} · db ${t.database} · user ${t.user || '(none)'} · ${isPrivateHost(t.host) ? 'private network' : 'public'}`);
-note(`ssl plan: ${sslLabel(policy.ssl)} — ${policy.reason}${policy.explicit ? ' (pinned)' : ''}`);
+note(`ssl plan: ${sslLabel(policy.ssl)} — ${policy.reason}${policy.pinned ? ' (pinned)' : policy.explicit ? ' (explicit)' : ''}`);
 
 // 2 ─────────────────────────────────────────────────────────────────── DNS
 console.log('\n2. DNS');
