@@ -269,7 +269,11 @@ export async function manageOpenPositions({ notify = null } = {}) {
       log.warn(`${p.symbol}: cannot read TP/SL (${e.message}) — leaving the existing one alone`);
       tpsl = null;
     }
-    if (tpsl && !tpsl.length && atr) {
+    if (tpsl && !tpsl.length) {
+      // No ATR is not a reason to leave the position naked: computeDynamicTpSl
+      // falls back to min_stop_pct when atr is 0, so the rescue bracket is
+      // still a real stop. The old `&& atr` made a candle-feed outage and a
+      // missing bracket coincide into an unprotected position.
       const synth = computeDynamicTpSl({
         symbol: p.symbol, side: p.side, price: Number(p.avgOpenPrice) || price, atr,
         timeframes: tframes,

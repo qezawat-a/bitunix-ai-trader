@@ -450,6 +450,29 @@ async function test() {
     }
   }
 
+  console.log('\nNo ATR + no existing stop still attaches a protective bracket');
+  {
+    const klineStub = bitunix.getKline;
+    try {
+      bitunix.getKline = async () => { throw new Error('all candle feeds down'); };
+      resetKlineCache();
+      pendingBook = [];
+      livePos = [mkPos({ unrealizedPNL: 0, markPrice: 10000, leverage: 25, liqPrice: 9600 })];
+      reset();
+      writes = [];
+      await pass();
+      assert(writes.length >= 1, `a bracket was attached without ATR (${writes.length} write(s))`);
+      if (writes[0]) {
+        assert(writes[0].slPrice > 0 && writes[0].slPrice < 10000,
+          `the fallback stop is below entry (${writes[0].slPrice})`);
+        assert(writes[0].tpPrice > 10000, `and the target is above it (${writes[0].tpPrice})`);
+      }
+    } finally {
+      bitunix.getKline = klineStub;
+      resetKlineCache();
+    }
+  }
+
   console.log('\nbreakevenStop is the same floor trailingStop uses');
   // The two must never diverge: trailingStop() is the ATR family's floor, and
   // the RATIO/INTERVAL families now share it. Asserting them equal means a
