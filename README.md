@@ -312,6 +312,28 @@ A 95%-confidence 5-strategy trend signal gets a tight stop and a ~3.5R target.
 A barely-qualified range signal gets a wider stop and ~1.3R. Nothing to
 configure, nothing static.
 
+### Real-time feed and stop triggers
+
+Two WebSocket connections start with the process:
+
+- **Public** — the scanner subscribes each symbol in the universe to its
+  `ticker` and execution-timeframe kline (`watchSymbols()`), so the public
+  socket is never connected-but-quiet.
+- **Private** — `balance`, `position`, `order`, `tpsl` are queued before login
+  and sent immediately after a successful login, then restored on reconnect.
+
+The guard loop reads the live ticker price first (falling back to the candle
+close, then the position mark) and applies:
+
+1. **Breakeven** at `breakeven_threshold` ROI — entry ± the round-trip fee
+   buffer. This works even when ATR data is temporarily unavailable.
+2. **Trailing** at `trailing_trigger_roi_pct` ROI — `trailing_distance_atr`
+   behind the live price (or RATIO/INTERVAL callback from the best price).
+   Without a valid ATR the stop stays at breakeven rather than jumping to the
+   market price.
+
+Stops only ever ratchet in the favourable direction.
+
 ---
 
 ## MCP

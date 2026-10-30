@@ -422,6 +422,34 @@ async function test() {
     }
   }
 
+  console.log('\nNo ATR at all still moves the stop to breakeven');
+  // This is the reported failure mode: the candle endpoint is down (or the
+  // execution TF has no bars), so there is no ATR anywhere. Breakeven does not
+  // need one, and a winner at +20% ROI must still get its stop moved.
+  {
+    const klineStub = bitunix.getKline;
+    try {
+      bitunix.getKline = async () => { throw new Error('all candle feeds down'); };
+      resetKlineCache();
+      pendingBook = [{ tpPrice: 12000, slPrice: 9900 }];
+      livePos = [mkPos({ unrealizedPNL: 20, markPrice: 10200, leverage: 25, liqPrice: 9600 })];
+      reset();
+      writes = [];
+      const noAtr = await pass();
+      const moved = noAtr.actions.find((a) => a.type === 'stop_moved');
+      assert(moved !== undefined,
+        `breakeven ran with no ATR at all (${JSON.stringify(noAtr.actions.map((a) => a.type))})`);
+      if (moved) {
+        assert(moved.stop > 10000 && moved.stop < 10100,
+          `the stop is the breakeven floor, not a market-price stop (${moved.stop})`);
+        assert(String(moved.reason).includes('breakeven'), `reason is breakeven ("${moved.reason}")`);
+      }
+    } finally {
+      bitunix.getKline = klineStub;
+      resetKlineCache();
+    }
+  }
+
   console.log('\nbreakevenStop is the same floor trailingStop uses');
   // The two must never diverge: trailingStop() is the ATR family's floor, and
   // the RATIO/INTERVAL families now share it. Asserting them equal means a

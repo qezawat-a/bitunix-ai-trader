@@ -1,4 +1,5 @@
 import bitunix from '../exchange/bitunix.js';
+import feed from '../exchange/ws.js';
 import { config } from '../config.js';
 import { createLogger } from '../logger.js';
 import { trailingStop, breakevenStop, computeDynamicTpSl, stopAtrFor } from './risk.js';
@@ -196,7 +197,17 @@ export async function manageOpenPositions({ notify = null } = {}) {
     const record = await tradeByPosition(pid);
 
     // candles for ATR
-    let atr = null, price = Number(p.avgOpenPrice);
+    let atr = null;
+    // Prefer the live public-feed mark/last price: the kline cache is up to
+    // 10s old and the manage loop runs every 15s, so a stale close can miss the
+    // exact tick that crossed breakeven/trailing. Fall back to the position's
+    // own markPrice, then entry. The candle close is only used when the feed
+    // has not delivered a ticker for this symbol yet.
+    const feedPrice = Number(feed.price(p.symbol));
+    let price = feedPrice > 0
+      ? feedPrice
+      : (Number(p.markPrice) > 0 ? Number(p.markPrice) : Number(p.avgOpenPrice));
+    let candlePrice = null;
     try {
       // Same rule as the scanner: the fallback is the configured default, not a
       // stale copy of it. The first timeframe is the execution one — it still
@@ -204,7 +215,8 @@ export async function manageOpenPositions({ notify = null } = {}) {
       const tf = String(s.timeframes || config.defaults.timeframes).split(',')[0].trim();
       const candles = await getCandles(p.symbol, tf, 220);
       atr = I.last(I.atr(candles.map((c) => c.high), candles.map((c) => c.low), candles.map((c) => c.close), 14));
-      price = I.last(candles.map((c) => c.close));
+      candlePrice = I.last(candles.map((c) => c.close));
+      if (feedPrice <= 0 && candlePrice > 0) price = candlePrice;
     } catch {}
 
     // Per-TF ATRs for the rescue-attachment path — same structure-TF policy
@@ -309,7 +321,12 @@ export async function manageOpenPositions({ notify = null } = {}) {
     // fails, so a dead candlefeed cannot silently kill breakeven/trailing.
     const stopPick = Number(atr) > 0 ? null : stopAtrFor({ atr, timeframes: tframes }, s);
     const guardAtr = (Number(atr) > 0 ? atr : stopPick?.atr) || null;
-    if (guardAtr > 0 && p.roi > 0) {
+    // Gate on ROI, not ATR: breakeven does not need ATR. Requiring an ATR meant
+    // a transient candle-fetch failure (or a quiet execution TF with no bars)
+    // skipped the entire block, leaving a winner with no stop movement at all.
+    // trailingStop() now falls back to breakeven when atr is missing, so a null
+    // ATR degrades to the safe direction instead of disabling protection.
+    if (p.roi > 0) {
       // method 3: two trailing families.
       //   ATR              — the original: breakeven, then a stop N ATR behind.
       //   RATIO / INTERVAL — the exchange's own semantics (help centre id=290):
@@ -330,13 +347,13 @@ export async function manageOpenPositions({ notify = null } = {}) {
           // the exchange's own liquidation price — authoritative, unlike an estimate
           liqPrice: Number(p.liqPrice) || null,
         });
-      } else if (p.roi >= Number(s.breakeven_threshold || 20)) {
-        if (p.roi >= Number(s.trailing_trigger_roi_pct || 25)) {
+      } else if (p.roi >= Number(s.breakeven_threshold ?? 20)) {
+        if (p.roi >= Number(s.trailing_trigger_roi_pct ?? 25)) {
           // activation expressed as the price at which trailing_trigger_roi_pct
           // of ROI is reached, so one setting drives both trailing families
           const entry = Number(p.avgOpenPrice);
           const lev = Number(p.leverage) || 1;
-          const move = (entry * Number(s.trailing_trigger_roi_pct || 25)) / (100 * lev);
+          const move = (entry * Number(s.trailing_trigger_roi_pct ?? 25)) / (100 * lev);
           const activationPrice = p.side === 'LONG' ? entry + move : entry - move;
           const step = trailingStep({
             side: p.side, entry, price, activationPrice,

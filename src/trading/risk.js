@@ -528,27 +528,39 @@ export function breakevenStop({ side, entry, liqPrice = null }) {
  */
 export function trailingStop({ side, entry, currentPrice, atr, roiPct, leverage, liqPrice }) {
   const s = settings();
-  const beThreshold = Number(s.breakeven_threshold || 20);        // ROI %
-  const trailTrigger = Number(s.trailing_trigger_roi_pct || 25);  // ROI %
+  // ?? not ||: 0 is a legitimate "arm immediately" value for either threshold
+  // and must not be silently replaced by the default.
+  const beThreshold = Number(s.breakeven_threshold ?? 20);        // ROI %
+  const trailTrigger = Number(s.trailing_trigger_roi_pct ?? 25);  // ROI %
   const isLong = side === 'LONG';
 
   // ROI here is leveraged return on margin, matching what the exchange UI shows
-  if (roiPct < beThreshold) return null;
+  if (!(roiPct >= beThreshold)) return null;
 
   let { stop, reason } = breakevenStop({ side, entry, liqPrice });
 
-  if (roiPct >= trailTrigger) {
+  // A trail is only meaningful with a positive ATR. Passing null/0 into the
+  // arithmetic used to produce `currentPrice - 0` (i.e. a stop at the market,
+  // which fires immediately) when ROI was above the trigger. With no ATR we
+  // stay at the breakeven floor — protective, and never looser than before.
+  const a = Number(atr);
+  if (roiPct >= trailTrigger && Number.isFinite(a) && a > 0) {
     // Trail a fixed distance behind price, in ATR. This used to be a hidden
     // curve (1.2 ATR tightening to 0.5 as profit grew) that the user could
     // neither see nor change — now it is one setting that means exactly what
     // it says.
     const k = clamp(Number(s.trailing_distance_atr ?? 0.5), 0.1, 5);
-    const trail = isLong ? currentPrice - atr * k : currentPrice + atr * k;
+    const trail = isLong ? currentPrice - a * k : currentPrice + a * k;
     if ((isLong && trail > stop) || (!isLong && trail < stop)) {
       stop = trail;
       reason = `trailing ${k} ATR`;
     }
+  } else if (roiPct >= trailTrigger) {
+    // No usable ATR: stay on the breakeven floor. The reason is exactly
+    // "breakeven" so callers that compare the floor reason keep working.
+    reason = 'breakeven';
   }
+
   return { stop, reason };
 }
 

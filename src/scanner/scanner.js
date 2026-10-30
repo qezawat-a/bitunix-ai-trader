@@ -1,4 +1,5 @@
 import bitunix from '../exchange/bitunix.js';
+import feed from '../exchange/ws.js';
 import { config } from '../config.js';
 import { createLogger } from '../logger.js';
 import * as I from '../strategies/indicators.js';
@@ -282,6 +283,17 @@ export function rankUniverse(pool, mode = 'VOLUME') {
  *                                 MOVERS), keep universe_size.
  * otherwise                    -> honour the explicit comma-separated list.
  */
+/** Keep the public socket subscribed to exactly the symbols we are scanning.
+ *  The WS is per-symbol; without this the public connection is open but quiet.
+ *  watchSymbols() dedupes, so calling it every scan does not re-send channels. */
+function watchPublic(symbols, s) {
+  const list = [...new Set((symbols || []).filter(Boolean))];
+  if (!list.length) return;
+  const tf = String(s.timeframes || config.defaults.timeframes).split(',')[0].trim() || '1m';
+  try { feed.watchSymbols(list, tf); }
+  catch (e) { log.warn(`public WS subscribe failed: ${e.message}`); }
+}
+
 export async function buildUniverse() {
   const s = settings();
   const raw = String(s.symbols || 'AUTO').trim();
@@ -294,7 +306,9 @@ export async function buildUniverse() {
 
   if (raw.toUpperCase() !== 'AUTO') {
     const wanted = raw.split(',').map((x) => x.trim().toUpperCase()).filter(Boolean);
-    return wanted.filter((x) => tradableSet.has(x));
+    const picked = wanted.filter((x) => tradableSet.has(x));
+    watchPublic(picked, s);
+    return picked;
   }
 
   const tickers = await bitunix.getTickers();
@@ -365,13 +379,14 @@ export async function buildUniverse() {
   }
 
   const size = Number(s.universe_size || 40);
-  const picked = scored.slice(0, size);
-  if (picked.length) {
-    const head = picked.slice(0, 5)
+  const pickedSymbols = scored.slice(0, size).map((x) => x.symbol);
+  watchPublic(pickedSymbols, s);
+  if (pickedSymbols.length) {
+    const head = scored.slice(0, 5)
       .map((x) => `${x.symbol} ${x.chg >= 0 ? '+' : ''}${x.chg.toFixed(1)}%`).join(', ');
-    log.info(`universe by ${mode}: ${picked.length} pairs — ${head}`);
+    log.info(`universe by ${mode}: ${pickedSymbols.length} pairs — ${head}`);
   }
-  return picked.map((x) => x.symbol);
+  return pickedSymbols;
 }
 
 /** Analyse one symbol across all configured timeframes. */
@@ -542,6 +557,7 @@ export async function consensus(analysis) {
 export async function scan({ onlySymbols = null, persist = true } = {}) {
   const s = settings();
   const universe = onlySymbols || await buildUniverse();
+  if (onlySymbols) watchPublic(universe, s);
   if (!universe.length) {
     throw new Error(`No tradable symbols matched ${onlySymbols ? onlySymbols.join(',') || '(empty list)' : s.symbols}. Check symbols and exchange pair status.`);
   }

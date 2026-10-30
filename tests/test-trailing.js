@@ -92,6 +92,22 @@ assert(inside.adjusted === false && Math.abs(inside.slPrice - 9960) < 1e-9,
 const unclamped = trailingStop({ ...LONG, currentPrice: 10300, roiPct: 30, liqPrice: 5000 });
 assert(Math.abs(unclamped.stop - 10275) < 1e-6, `distant liq leaves the stop untouched = ${unclamped.stop.toFixed(2)}`);
 
+console.log('\nMissing ATR points to breakeven, never to a market-price stop');
+// The guard used to require an ATR before calling this function. If it was
+// called with atr=null at ROI above the trigger, the old arithmetic produced
+// `price - 0` — a stop AT the market that fires immediately. With no ATR the
+// correct answer is the breakeven floor.
+const noAtr = trailingStop({ ...LONG, currentPrice: 10300, roiPct: 30, atr: null });
+assert(noAtr !== null, 'ROI above trigger with no ATR still returns protection');
+assert(Math.abs(noAtr.stop - 10000 * 1.0008) < 1e-6,
+  `no ATR -> breakeven stop ${noAtr.stop.toFixed(2)}, not the market price`);
+assert(noAtr.reason.includes('breakeven'), `reason says breakeven (got "${noAtr.reason}")`);
+const zeroAtr = trailingStop({ ...LONG, currentPrice: 10300, roiPct: 30, atr: 0 });
+assert(Math.abs(zeroAtr.stop - 10000 * 1.0008) < 1e-6, 'atr=0 is treated as missing, not as a zero-distance trail');
+const shortNoAtr = trailingStop({ ...LONG, side: 'SHORT', currentPrice: 9700, roiPct: 30, atr: null });
+assert(Math.abs(shortNoAtr.stop - 10000 * 0.9992) < 1e-6,
+  `SHORT no-ATR breakeven sits below entry (${shortNoAtr.stop.toFixed(4)})`);
+
 console.log('\nEnd-to-end: the exact case that used to never trigger');
 // Cross-margin account with 5000 total margin; a 100 USDT position PnL.
 // Old code: 100/5000 = 2% -> below threshold -> stop never moved. Ever.

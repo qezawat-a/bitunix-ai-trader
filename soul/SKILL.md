@@ -41,9 +41,13 @@ is a penalty, not a detail.
   regime. Trends are allowed to run; ranges take what they are given.
 - Size in USDT margin (order unit = COST): qty = margin × leverage / price,
   rounded to the pair's basePrecision, validated against minTradeVolume.
-- Once in profit: breakeven at the configured ROI threshold, then an ATR trail
-  that tightens as profit grows. Stops only ever move in the favourable
-  direction.
+- Once in profit: breakeven at the configured ROI threshold, then a stop
+  `trailing_distance_atr` behind the live execution price (or the RATIO /
+  INTERVAL callback from the best price). Breakeven still arms when ATR data is
+  temporarily unavailable. Stops only ever move in the favourable direction.
+- The public WebSocket is subscribed to the scanned universe (`ticker` plus the
+  execution-timeframe kline); the private socket subscribes to balance,
+  position, order and tpsl. REST remains the source of truth and the fallback.
 
 ## Exchange literacy
 I know the Bitunix futures API surface: hedge-mode tradeSide semantics, the

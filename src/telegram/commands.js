@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import bitunix from '../exchange/bitunix.js';
+import feed from '../exchange/ws.js';
 import ai from '../ai/providers.js';
 import agent from '../ai/agent.js';
 import { loadSkillFiles, SKILLS_DIR } from '../ai/soul.js';
@@ -1176,6 +1177,17 @@ export function createCommandHandler(ctx) {
         L.push(mdt`✅ Bitunix: ${Number(b.available).toFixed(2)} USDT available`);
       } catch (e) {
         L.push(mdt`❌ Bitunix: ${e.message}`);
+      }
+
+      // 5. WebSockets — public and private are separate connections
+      L.push('', bold('WebSockets'));
+      try {
+        const ws = feed.status();
+        L.push(mdt`${ok(ws.public.connected)} Public: ${ws.public.connected ? 'connected' : 'connecting'} · ${ws.public.subscriptions} channels`);
+        L.push(mdt`${ok(ws.private.connected)} Private: ${ws.private.connected ? 'logged in' : 'connecting'} · ${ws.private.subscriptions} channels`);
+        L.push(mdt`Tickers: ${ws.tickers}`);
+      } catch (e) {
+        L.push(mdt`❌ WebSockets: ${e.message}`);
       }
 
       await reply(chatId, L.join('\n'));

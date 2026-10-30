@@ -13,7 +13,7 @@ const log = createLogger('ws');
  *  - max 300 channel subscriptions per connection
  *  - ping: {"op":"ping","ping":<unix seconds>}
  */
-class BitunixSocket extends EventEmitter {
+export class BitunixSocket extends EventEmitter {
   constructor(url, { privateChannel = false } = {}) {
     super();
     this.url = url;
@@ -24,11 +24,14 @@ class BitunixSocket extends EventEmitter {
     this.alive = false;
     this.loggedIn = false;
     this.backoff = 1000;
-    this._pump = setInterval(() => this._flush(), 250); // <=4 msg/s
+    this._pump = null;
+    this._stopped = false;
   }
 
   connect() {
+    if (this._stopped) return;
     if (this.ws && (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)) return;
+    if (!this._pump) this._pump = setInterval(() => this._flush(), 250); // <=4 msg/s
     this.ws = new WebSocket(this.url);
 
     this.ws.on('open', () => {
@@ -59,6 +62,7 @@ class BitunixSocket extends EventEmitter {
     this.ws.on('close', () => {
       this.alive = false; this.loggedIn = false;
       clearInterval(this.pingTimer);
+      if (this._stopped) return;
       log.warn(`closed ${this.url}, reconnecting in ${this.backoff}ms`);
       setTimeout(() => this.connect(), this.backoff);
       this.backoff = Math.min(this.backoff * 2, 30_000);
@@ -94,10 +98,19 @@ class BitunixSocket extends EventEmitter {
 
   subscribe(args) {
     const list = Array.isArray(args) ? args : [args];
-    for (const a of list) this.subs.set(`${a.ch}:${a.symbol || ''}`, a);
-    if (this.alive && (!this.privateChannel || this.loggedIn)) {
-      for (let i = 0; i < list.length; i += 20) {
-        this.send({ op: 'subscribe', args: list.slice(i, i + 20) });
+    // Only send channels that are not already subscribed. The scanner calls
+    // watchSymbols() on every pass; without this guard the same ticker/kline
+    // channels would be re-sent every 15s until the server's 300-channel cap.
+    const fresh = [];
+    for (const a of list) {
+      const key = `${a.ch}:${a.symbol || ''}`;
+      if (this.subs.has(key)) continue;
+      this.subs.set(key, a);
+      fresh.push(a);
+    }
+    if (fresh.length && this.alive && (!this.privateChannel || this.loggedIn)) {
+      for (let i = 0; i < fresh.length; i += 20) {
+        this.send({ op: 'subscribe', args: fresh.slice(i, i + 20) });
       }
     }
   }
@@ -116,7 +129,9 @@ class BitunixSocket extends EventEmitter {
   }
 
   close() {
+    this._stopped = true;
     clearInterval(this._pump);
+    this._pump = null;
     clearInterval(this.pingTimer);
     try { this.ws?.close(); } catch {}
   }
@@ -142,11 +157,19 @@ export class MarketFeed extends EventEmitter {
     this.positions = new Map(); // positionId -> position event
     this.balance = null;
     this.lastEventAt = 0;
+    this._started = false;
   }
 
   start() {
+    if (this._started) return this;
+    this._started = true;
     this.pub.on('data', (m) => this._onPublic(m));
     this.priv.on('data', (m) => this._onPrivate(m));
+    this.pub.on('open', () => this.emit('public_open'));
+    this.priv.on('open', () => this.emit('private_open'));
+    // The private channel set is fixed, so subscribe here instead of relying
+    // on every caller to remember. subscribe() queues until login succeeds.
+    this.subscribePrivate();
     this.pub.connect();
     this.priv.connect();
     // No global ticker stream. Verified against the live public endpoint
@@ -156,6 +179,16 @@ export class MarketFeed extends EventEmitter {
     // channels stream continuously, so call watchSymbols() once the trading
     // universe is known.
     return this;
+  }
+
+  /** Live connection state for /status, logs and tests. */
+  status() {
+    return {
+      public: { connected: this.pub.alive, subscriptions: this.pub.subs.size },
+      private: { connected: this.priv.loggedIn, subscriptions: this.priv.subs.size },
+      tickers: this.tickers.size,
+      lastEventAt: this.lastEventAt || null,
+    };
   }
 
   /**

@@ -56,8 +56,10 @@ async function main() {
   log.info('models: ' + ai.status().map((p) => `${p.provider}=${p.model}`).join(' '));
 
   // ---- websocket feed --------------------------------------------------
+  // start() opens BOTH sockets and queues the private channel set; the public
+  // ticker/kline subscriptions are added by the scanner once the universe is
+  // known (watchSymbols() in buildUniverse).
   feed.start();
-  feed.subscribePrivate();
 
   // ---- telegram --------------------------------------------------------
   // start() degrades instead of throwing: a bad bot token must not take the
