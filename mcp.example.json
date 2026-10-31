@@ -1,0 +1,53 @@
+{
+  "_comment": [
+    "Copy this to mcp.json to give the agent extra tools from external MCP servers.",
+    "Every tool is namespaced server__tool, so 'search' below becomes 'search__brave_web_search'.",
+    "A server that fails to start is skipped with a warning — it never blocks the trader.",
+    "After editing, run /mcp reload in Telegram (no restart needed).",
+    "Remove the entries you do not want. Each one spawns a process at boot."
+  ],
+
+  "mcpServers": {
+    "search": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-brave-search"],
+      "env": { "BRAVE_API_KEY": "your-brave-key" },
+      "enabled": false
+    },
+
+    "fetch": {
+      "_note": "Fetch a URL as markdown — useful for reading exchange announcements.",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-fetch"],
+      "enabled": false
+    },
+
+    "memory": {
+      "_note": "Knowledge graph memory. The agent already has Neon memory; this is extra.",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-memory"],
+      "enabled": false
+    },
+
+    "filesystem": {
+      "_note": "Read/write files in one directory. Scope it tightly.",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/absolute/path/to/notes"],
+      "enabled": false
+    },
+
+    "sequential-thinking": {
+      "_note": "Structured step-by-step reasoning for hard calls.",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-sequential-thinking"],
+      "enabled": false
+    },
+
+    "python": {
+      "_note": "Any MCP server, any language — it just has to speak stdio JSON-RPC.",
+      "command": "uvx",
+      "args": ["some-python-mcp-server"],
+      "enabled": false
+    }
+  }
+}

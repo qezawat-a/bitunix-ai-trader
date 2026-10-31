@@ -1,0 +1,566 @@
+import bitunix from '../exchange/bitunix.js';
+import feed from '../exchange/ws.js';
+import { config } from '../config.js';
+import { createLogger } from '../logger.js';
+import { trailingStop, breakevenStop, computeDynamicTpSl, stopAtrFor } from './risk.js';
+import {
+  trailingStep, resetTrailing, trailingSnapshot, evaluateAccountTpSl, closeEverything,
+  mostProtectiveStopRow,
+} from './tpsl.js';
+import { upsertPositionTpSl, closePosition, forgetStop } from './executor.js';
+import { getCandles } from '../scanner/scanner.js';
+import * as I from '../strategies/indicators.js';
+import {
+  settings, openTrades, tradeByPosition, closeTrade, bumpStrategy,
+  logEvent, remember, setCooldown,
+} from '../db/index.js';
+
+const log = createLogger('manager');
+
+const lastStop = new Map();     // positionId -> last stop price we pushed
+const softStops = new Map();    // positionId -> { side, stop } enforced by us when the exchange won't move it
+const seenPositions = new Set();
+
+/**
+ * Forget the guard loop's per-process memory of what it has already done.
+ *
+ * `lastStop` is the ratchet state — it is what stops a trailing stop from
+ * loosening when price retraces — so it is deliberately kept across passes.
+ * That makes the module untestable in isolation: one scenario's stop would
+ * suppress the next one's move. Exported for tests only; nothing in the
+ * running system should call it.
+ */
+export function resetGuardState() {
+  lastStop.clear();
+  softStops.clear();
+  seenPositions.clear();
+}
+
+/** ROI % on margin, the number the exchange UI shows.
+ *
+ * BUG FIX (2024-10): In CROSS margin mode the exchange returns `margin` as the
+ * TOTAL ACCOUNT margin, not the position-specific margin. Dividing PnL by that
+ * gives a near-zero ROI and breakeven/trailing never triggers.
+ *
+ * Fix: compute ROI from notional and leverage instead:
+ *   ROI = (PnL / (notional / leverage)) * 100
+ *       = (PnL * leverage / notional) * 100
+ * This is correct for both CROSS and ISOLATION margin modes.
+ */
+export function positionRoi(p) {
+  const pnl = Number(p.unrealizedPNL || 0);
+  // entryValue is Bitunix's own notional figure; prefer it over the derived
+  // qty*avgOpenPrice which drifts on part-closed positions. Fall back to the
+  // derived figure, then to p.notional if a caller set it explicitly.
+  const notional = Number(p.entryValue || p.notional || (Number(p.qty || 0) * Number(p.avgOpenPrice || 0)));
+  // Default to configured leverage when the position row omits it (cross mode
+  // rows sometimes do), rather than 0 — otherwise ROI silently collapses to 0
+  // and breakeven/trailing never arm.
+  const leverage = Number(p.leverage || p.configuredLeverage || 1);
+  const margin = Number(p.margin || 0);
+
+  // Primary path: notional + leverage works for both cross and isolated margin
+  if (notional > 0 && leverage > 0) {
+    return (pnl * leverage / notional) * 100;
+  }
+
+  // Fallback for isolated margin where margin is position-specific
+  if (margin > 0) {
+    return (pnl / margin) * 100;
+  }
+
+  return 0;
+}
+
+export async function livePositions() {
+  const ps = await bitunix.getPendingPositions();
+  return (ps || []).map((p) => {
+    const notional = Number(p.entryValue || (Number(p.qty || 0) * Number(p.avgOpenPrice || 0)));
+    const leverage = Number(p.leverage || 0);
+    const enriched = {
+      ...p,
+      // get_pending_positions returns `entryValue` — the exchange's own notional
+      // figure (PositionPendingResp.entryValue). Prefer it over deriving from
+      // qty x avgOpenPrice, which drifts once the position is part-closed and
+      // the average entry no longer matches the live size. The derivation stays
+      // as the fallback for rows that predate the field or come from the WS push.
+      notional,
+      unrealizedPNL: Number(p.unrealizedPNL || 0),
+      qty: Number(p.qty || 0),
+      margin: Number(p.margin || 0),
+      avgOpenPrice: Number(p.avgOpenPrice || 0),
+      leverage,
+      // Carry the configured leverage so positionRoi can fall back to it when
+      // the exchange row omits the field (cross-mode rows sometimes do).
+      configuredLeverage: Number(settings().leverage || config.defaults.leverage || 1),
+    };
+    // Compute ROI AFTER the notional override so it uses entryValue, not the
+    // derived qty*avgOpenPrice that drifts on part-closed positions.
+    enriched.roi = positionRoi(enriched);
+    return enriched;
+  });
+}
+
+/**
+ * Position guard — runs every manage_interval_sec / guard_interval_sec.
+ *  - makes sure every open position HAS a TP/SL (dynamic, ATR based)
+ *  - moves the stop to breakeven at breakeven_threshold ROI
+ *  - trails the stop after trailing_trigger_roi_pct ROI
+ *  - detects positions closed on the exchange and books the result in Neon
+ */
+export async function manageOpenPositions({ notify = null } = {}) {
+  const s = settings();
+  let positions;
+  try {
+    positions = await livePositions();
+  } catch (e) {
+    // exchange unreachable: do nothing rather than act on stale state
+    log.warn(`cannot read positions, skipping management pass: ${e.message}`);
+    return { positions: [], actions: [], degraded: e.message };
+  }
+  const actions = [];
+
+  // ---- method 4: account-level TP/SL --------------------------------------
+  // Checked first: if the whole book is being flattened there is no point
+  // adjusting individual stops on the way out.
+  const acct = evaluateAccountTpSl({
+    positions,
+    takeProfitUsdt: s.account_tp_usdt,
+    stopLossUsdt: s.account_sl_usdt,
+  });
+  if (acct.hit) {
+    const r = await closeEverything(acct.reason);
+    actions.push({ type: 'account_tpsl', side: acct.side, totalPnl: acct.totalPnl, ok: r.ok });
+    await logEvent('account_tpsl', { ...acct, ok: r.ok });
+    if (notify) {
+      await notify(`${acct.side === 'TAKE_PROFIT' ? '🎯' : '🛑'} *Account ${acct.side === 'TAKE_PROFIT' ? 'take-profit' : 'stop-loss'}* — closing every position\n${acct.reason}`);
+    }
+    return { positions, actions, accountTpSl: acct };
+  }
+
+  const liveIds = new Set(positions.map((p) => String(p.positionId)));
+  for (const id of Object.keys(trailingSnapshot())) {
+    if (!liveIds.has(id)) resetTrailing(id);
+  }
+
+  // ---- book positions that disappeared (TP/SL hit or manual close) ----
+  for (const t of await openTrades()) {
+    if (!t.position_id || liveIds.has(String(t.position_id))) continue;
+    try {
+      const hist = await bitunix.getHistoryPositions({ positionId: t.position_id, limit: 1 });
+      // The SDK documents { positionList: [...] } but get_history_positions has
+      // answered with a bare array before. Reading only .positionList meant h
+      // was undefined on such a response, so the trade was booked with pnl 0
+      // and a null exit price: every closed position looked like a flat loss,
+      // bumpStrategy learned from a number that never happened, and the lesson
+      // written into memory said LOSS for a winning trade. Normalise first.
+      const h = (Array.isArray(hist) ? hist[0] : hist?.positionList?.[0]) || null;
+      if (!h) { log.warn(`${t.position_id}: history returned no row — left open, will retry next pass`); continue; }
+      // Documented semantics of get_history_positions:
+      //   realizedPNL  "Realized PnL(exclude funding fee and transaction fee)"
+      //   fee          "Deducted transaction fees ... during the position" —
+      //                positive is a cost taken out of the position
+      //   funding      "total funding fee during the position" — negative is
+      //                paid by the position, positive is received
+      // So the true result is realizedPNL - fee + funding. This is the same
+      // formula exchangePerformance() uses; the two must never disagree.
+      const pnl = Number(h?.realizedPNL ?? 0) - Number(h?.fee ?? 0) + Number(h?.funding ?? 0);
+      const roi = t.margin_usdt ? (pnl / Number(t.margin_usdt)) * 100 : null;
+      await closeTrade({
+        positionId: t.position_id,
+        exitPrice: h?.closePrice ? Number(h.closePrice) : null,
+        realizedPnl: pnl, roiPct: roi, reason: 'exchange_close',
+      });
+      for (const st of (t.strategies || [])) await bumpStrategy(st, pnl > 0, pnl);
+      await remember({
+        kind: 'lesson', subject: t.symbol, importance: pnl > 0 ? 5 : 7,
+        content: `${t.side} ${t.symbol} closed ${pnl > 0 ? 'WIN' : 'LOSS'} ${pnl.toFixed(4)} USDT `
+          + `(ROI ${roi?.toFixed(1)}%) — strategies: ${(t.strategies || []).join(', ')}, `
+          + `entry ${t.entry_price}, conf ${t.confidence}, agreement ${t.agreement}.`,
+      });
+      await setCooldown(t.symbol, Number(s.cooldown_min), 'position closed');
+      forgetStop(t.position_id);
+      actions.push({ type: 'booked', symbol: t.symbol, pnl, roi });
+      if (notify) {
+        await notify(
+          `${pnl >= 0 ? '🟢' : '🔴'} *Position closed* — ${t.symbol} ${t.side}\n`
+          + `PnL: ${pnl.toFixed(4)} USDT  (ROI ${roi != null ? roi.toFixed(1) : '?'}%)\n`
+          + `Entry ${t.entry_price} → Exit ${h?.closePrice ?? '?'}`,
+        );
+      }
+    } catch (e) { log.warn(`booking ${t.position_id}: ${e.message}`); }
+  }
+
+  // ---- guard each live position --------------------------------------
+  for (const p of positions) {
+    const pid = String(p.positionId);
+    const record = await tradeByPosition(pid);
+
+    // candles for ATR
+    let atr = null;
+    // Prefer the live public-feed mark/last price: the kline cache is up to
+    // 10s old and the manage loop runs every 15s, so a stale close can miss the
+    // exact tick that crossed breakeven/trailing. Fall back to the position's
+    // own markPrice, then entry. The candle close is only used when the feed
+    // has not delivered a ticker for this symbol yet.
+    const feedPrice = Number(feed.price(p.symbol));
+    let price = feedPrice > 0
+      ? feedPrice
+      : (Number(p.markPrice) > 0 ? Number(p.markPrice) : Number(p.avgOpenPrice));
+    let candlePrice = null;
+    try {
+      // Same rule as the scanner: the fallback is the configured default, not a
+      // stale copy of it. The first timeframe is the execution one — it still
+      // fixes the PRICE here; stop SIZING now goes through stopAtrFor.
+      const tf = String(s.timeframes || config.defaults.timeframes).split(',')[0].trim();
+      const candles = await getCandles(p.symbol, tf, 220);
+      atr = I.last(I.atr(candles.map((c) => c.high), candles.map((c) => c.low), candles.map((c) => c.close), 14));
+      candlePrice = I.last(candles.map((c) => c.close));
+      if (feedPrice <= 0 && candlePrice > 0) price = candlePrice;
+    } catch {}
+
+    // Per-TF ATRs for the rescue-attachment path — same structure-TF policy
+    // as the executor (stopAtrFor). Trailing uses the execution-TF ATR directly
+    // instead: the structure-TF ATR is 2-3x larger and makes the trailing stop
+    // fall behind breakeven so it never activates.
+    let tframes = {};
+    for (const t of String(s.timeframes || config.defaults.timeframes).split(',').map((x) => x.trim()).filter(Boolean)) {
+      try {
+        const cs = await getCandles(p.symbol, t, 220);
+        const a = I.last(I.atr(cs.map((c) => c.high), cs.map((c) => c.low), cs.map((c) => c.close), 14));
+        if (Number.isFinite(a) && a > 0) tframes[t] = { atr: a };
+      } catch {}
+    }
+    // 0) software stop: the exchange refused to move the SL earlier, so enforce
+    //    the wanted level ourselves. Without this a winner reverses into a loss
+    //    while the original wide stop sits untouched.
+    const soft = softStops.get(pid);
+    if (soft) {
+      const crossed = soft.side === 'LONG' ? price <= soft.stop : price >= soft.stop;
+      if (crossed) {
+        log.warn(`${p.symbol}: software stop ${soft.stop} hit at ${price} — closing`);
+        const c = await closePosition(pid, 'software_stop');
+        actions.push({ type: 'software_stop', symbol: p.symbol, stop: soft.stop, price, ok: c?.ok !== false });
+        if (notify) await notify(`🛡 *Software stop* — ${p.symbol} ${p.side} closed at ~${price} (stop ${soft.stop})`);
+        if (c?.ok !== false) softStops.delete(pid);
+        continue;
+      }
+    }
+
+    // 1) position with no TP/SL at all -> attach one now (never leave naked)
+    //
+    // This read MUST distinguish "the position has no stop" from "I could not
+    // ask". Swallowing the error and treating it as an empty list meant a
+    // transient API failure looked like a naked position, and the rescue below
+    // then wrote a fresh ATR stop over a trailing stop that was already
+    // locking in profit — widening it back out to entry distance. A stop that
+    // had ratcheted to 164.81 on a short from 165.41 was reset to 168.19, so
+    // when price came back it sailed straight through the level that should
+    // have closed the trade.
+    let tpsl = null;
+    try {
+      const raw = await bitunix.getPendingTpSlOrders({ symbol: p.symbol, positionId: pid });
+      // Bitunix returns { orderList: [...] }, but a bare array has been seen too;
+      // normalise the same way executor.upsertPositionTpSl does so the !length
+      // check below tests the actual row count, not an undefined .length on the
+      // wrapper object.
+      tpsl = (Array.isArray(raw) ? raw : (raw?.orderList || []));
+    } catch (e) {
+      log.warn(`${p.symbol}: cannot read TP/SL (${e.message}) — leaving the existing one alone`);
+      tpsl = null;
+    }
+    if (tpsl && !tpsl.length) {
+      // No ATR is not a reason to leave the position naked: computeDynamicTpSl
+      // falls back to min_stop_pct when atr is 0, so the rescue bracket is
+      // still a real stop. The old `&& atr` made a candle-feed outage and a
+      // missing bracket coincide into an unprotected position.
+      const synth = computeDynamicTpSl({
+        symbol: p.symbol, side: p.side, price: Number(p.avgOpenPrice) || price, atr,
+        timeframes: tframes,
+        confidence: Number(record?.confidence || s.min_confidence),
+        agreement: Number(record?.agreement || s.min_agreement),
+        atrPct: (atr / price) * 100, regime: 'RANGE',
+        leverage: Number(p.leverage) || null,
+        maxLeverage: Number((await bitunix.pairInfo(p.symbol))?.maxLeverage) || null,
+        // real maintenance margin rate for this position's notional
+        mmr: await bitunix.tierFor({
+          symbol: p.symbol,
+          notional: Number(p.qty) * (Number(p.avgOpenPrice) || price),
+        }).then((t) => t.mmr).catch(() => null),
+        // use the exchange's real liquidation price, not an estimate: this
+        // position already exists, so there is nothing to guess about
+        liqPrice: Number(p.liqPrice) || null,
+      });
+      if (synth.liqAdjusted) {
+        log.warn(`${p.symbol}: rescue stop clamped inside liq — ${synth.liqNote}`);
+      }
+      const r = await upsertPositionTpSl({
+        symbol: p.symbol, positionId: pid, tpPrice: synth.tpPrice, slPrice: synth.slPrice,
+        side: p.side, entry: Number(p.avgOpenPrice) || price,
+      });
+      if (r.ok) lastStop.set(pid, r.slPrice ?? synth.slPrice);
+      actions.push({ type: 'tpsl_attached', symbol: p.symbol, ok: r.ok, tp: synth.tpPrice, sl: synth.slPrice });
+      if (notify && r.ok) {
+        await notify(`🛡 *TP/SL attached* — ${p.symbol} ${p.side}\nTP ${synth.tpPrice.toPrecision(8)} | SL ${synth.slPrice.toPrecision(8)}  (${synth.explain})`
+          + (synth.liqAdjusted ? `\n⚠️ stop pulled inside liquidation (${Number(p.liqPrice).toPrecision(8)}) — ${p.leverage}x is too high for this ATR` : ''));
+      }
+      // BUG FIX: this used to `continue`, dropping straight to the next
+      // position. On any pass whose pending-TP/SL read came back EMPTY while
+      // an entry-order bracket in fact existed (rows without a bound
+      // positionId, a lagging write, a rejected place), the rescue re-attached
+      // a wide ATR stop and the breakeven/trailing step below was NEVER
+      // reached — which read to the user exactly as "breakeven and trailing
+      // died". Fall through instead: the ratchet below only writes again when
+      // the protection level is an improvement, so a fresh bracket plus a
+      // breakeven/trailing move in the SAME pass is always at worst neutral.
+    }
+
+    // 2) breakeven + trailing
+    // TRAILING SCALES TO THE EXECUTION-TF (1m) ATR — the reverse of the
+    // entry bracket. The structure-TF ATR is 2-3x larger, so with it the
+    // trail distance is wider than the move since breakeven: the ATR trail
+    // always fell BELOW the breakeven floor and never overrode it — the
+    // stop parked at breakeven "forever" even at 36% ROI (measured live).
+    // The gate falls back to the structure-TF ATR only when the 1m fetch
+    // fails, so a dead candlefeed cannot silently kill breakeven/trailing.
+    const stopPick = Number(atr) > 0 ? null : stopAtrFor({ atr, timeframes: tframes }, s);
+    const guardAtr = (Number(atr) > 0 ? atr : stopPick?.atr) || null;
+    // Gate on ROI, not ATR: breakeven does not need ATR. Requiring an ATR meant
+    // a transient candle-fetch failure (or a quiet execution TF with no bars)
+    // skipped the entire block, leaving a winner with no stop movement at all.
+    // trailingStop() now falls back to breakeven when atr is missing, so a null
+    // ATR degrades to the safe direction instead of disabling protection.
+    if (p.roi > 0) {
+      // method 3: two trailing families.
+      //   ATR              — the original: breakeven, then a stop N ATR behind.
+      //   RATIO / INTERVAL — the exchange's own semantics (help centre id=290):
+      //                      arm at an activation price, then close once price
+      //                      retraces by a callback from the BEST price seen.
+      // All three pass through the same breakeven floor first, so the band
+      // between breakeven_threshold and trailing_trigger_roi_pct is protected
+      // whichever family is configured. Both end up writing a native stop, so
+      // the exchange still protects the position if this process dies mid-trend.
+      const tm = String(s.trailing_method || 'ATR').toUpperCase();
+      let trail = null;
+      if (tm === 'ATR') {
+        trail = trailingStop({
+          side: p.side, entry: Number(p.avgOpenPrice), currentPrice: price,
+          // execution-TF ATR (see the gate comment above): structure-TF
+          // sizing here is what left the stop parked at breakeven forever.
+          atr: guardAtr, roiPct: p.roi, leverage: Number(p.leverage),
+          // the exchange's own liquidation price — authoritative, unlike an estimate
+          liqPrice: Number(p.liqPrice) || null,
+        });
+      } else if (p.roi >= Number(s.breakeven_threshold ?? 20)) {
+        if (p.roi >= Number(s.trailing_trigger_roi_pct ?? 25)) {
+          // activation expressed as the price at which trailing_trigger_roi_pct
+          // of ROI is reached, so one setting drives both trailing families
+          const entry = Number(p.avgOpenPrice);
+          const lev = Number(p.leverage) || 1;
+          const move = (entry * Number(s.trailing_trigger_roi_pct ?? 25)) / (100 * lev);
+          const activationPrice = p.side === 'LONG' ? entry + move : entry - move;
+          const step = trailingStep({
+            side: p.side, entry, price, activationPrice,
+            callback: Number(s.trailing_callback ?? 1.5), mode: tm,
+            positionId: pid, liqPrice: Number(p.liqPrice) || null,
+          });
+          if (step.armed) trail = { stop: step.stop, reason: step.reason };
+        } else {
+          // Between breakeven_threshold and the trailing trigger the stop sits
+          // at breakeven+fee, exactly as the ATR family does. Without this the
+          // RATIO/INTERVAL families kept the wide entry stop until the trigger,
+          // so a winner could round-trip back through entry and close at a loss.
+          trail = breakevenStop({
+            side: p.side, entry: Number(p.avgOpenPrice),
+            liqPrice: Number(p.liqPrice) || null,
+          });
+        }
+      }
+      if (trail) {
+        // Ratchet against what the EXCHANGE has, not against our own memory of
+        // what we wrote. `lastStop` used to be the only baseline, so once the
+        // two disagreed — a write that reported success but never landed, or a
+        // restart — the guard computed a perfectly good breakeven stop, saw
+        // "not an improvement" against its own phantom value, and returned an
+        // empty action list on every pass while the position kept the original
+        // wide stop. The exchange is the source of truth; lastStop is only a
+        // fallback for when the read is unavailable.
+        const exchangeRow = mostProtectiveStopRow(tpsl, p.side);
+        const exchangeStop = exchangeRow ? Number(exchangeRow.slPrice) : null;
+        const baseline = exchangeStop != null && Number.isFinite(exchangeStop)
+          ? exchangeStop
+          : lastStop.get(pid);
+        const improved = baseline == null
+          || (p.side === 'LONG' ? trail.stop > baseline * 1.0002 : trail.stop < baseline * 0.9998);
+        if (improved) {
+          // preserve the existing take-profit, but read it off the
+          // whole-position row rather than whatever row happened to be first
+          const tpRow = (tpsl || []).find((r) => r && r.tpPrice != null) || null;
+          const existingTp = tpRow ? Number(tpRow.tpPrice) : null;
+          const r = await upsertPositionTpSl({
+            symbol: p.symbol, positionId: pid, slPrice: trail.stop, tpPrice: existingTp,
+            side: p.side, entry: Number(p.avgOpenPrice),
+          });
+          if (r.ok) {
+            softStops.delete(pid);
+            lastStop.set(pid, trail.stop);
+            actions.push({ type: 'stop_moved', symbol: p.symbol, stop: trail.stop, reason: trail.reason, roi: p.roi });
+            if (notify) {
+              await notify(`🔒 *Stop moved* — ${p.symbol} ${p.side}\nROI ${p.roi.toFixed(1)}% → SL ${trail.stop.toPrecision(8)} (${trail.reason})`);
+            }
+          } else {
+            // Do NOT set lastStop here. Leaving it unset is what lets the next
+            // pass retry instead of treating the phantom stop as done.
+            log.error(`${p.symbol} ${p.side}: stop move FAILED (${r.reason})`);
+            softStops.set(pid, { side: p.side, stop: trail.stop });
+            actions.push({
+              type: 'stop_move_failed', symbol: p.symbol, side: p.side,
+              wanted: trail.stop, exchangeSl: r.exchangeSl ?? null, reason: r.reason, roi: p.roi,
+            });
+            await logEvent('stop_move_failed', {
+              symbol: p.symbol, side: p.side, positionId: pid, wanted: trail.stop,
+              exchangeSl: r.exchangeSl ?? null, reason: r.reason, roi: p.roi,
+            }, p.symbol);
+            if (notify) {
+              await notify(
+                `⚠️ *Stop move failed* — ${p.symbol} ${p.side}\n`
+                + `wanted SL ${trail.stop.toPrecision(8)} (${trail.reason}) · `
+                + `exchange still shows ${r.exchangeSl != null ? r.exchangeSl : 'no stop'}\n`
+                + `The exchange accepted the request but did not change the order. `
+                + `Move the stop by hand until this clears.`,
+              );
+            }
+          }
+        }
+      }
+    }
+
+    if (!seenPositions.has(pid)) {
+      seenPositions.add(pid);
+      await logEvent('position_seen', { symbol: p.symbol, side: p.side, qty: p.qty }, p.symbol);
+    }
+  }
+
+  return { positions, actions };
+}
+
+/**
+ * Reversal engine: if an open position has a high-confidence opposite signal,
+ * flip it (close + open the other way).
+ */
+export async function checkReversal(signals) {
+  const s = settings();
+  if (!s.reversal_enabled) return [];
+  const minConf = Number(s.reversal_confidence || 85);
+  let positions = [];
+  try { positions = await livePositions(); }
+  catch (e) { log.warn(`checkReversal: ${e.message}`); return []; }
+  const out = [];
+
+  for (const p of positions) {
+    const sig = signals.find((x) => x.symbol === p.symbol);
+    if (!sig) continue;
+    const opposite = (p.side === 'LONG' && sig.side === 'SHORT') || (p.side === 'SHORT' && sig.side === 'LONG');
+    if (!opposite) continue;
+    if (sig.confidence < minConf) continue;
+    if (sig.agreement < Number(s.min_agreement)) continue;
+    out.push({ position: p, signal: sig });
+  }
+  return out;
+}
+
+export async function portfolioSnapshot() {
+  const positions = await livePositions();
+  if (!positions.length) return { count: 0, totalPnl: 0, totalMargin: 0, roi: 0, positions: [] };
+  const totalPnl = positions.reduce((a, p) => a + p.unrealizedPNL, 0);
+  const totalMargin = positions.reduce((a, p) => a + p.margin, 0);
+  // In cross mode p.margin is total account margin, so use notional/leverage
+  // per position for a meaningful ROI instead of diluting to ~0.
+  const totalNotional = positions.reduce((a, p) => a + (p.notional || 0), 0);
+  const avgLeverage = positions.reduce((a, p) => a + (p.leverage || 0), 0) / (positions.length || 1);
+  const roi = (totalNotional > 0 && avgLeverage > 0)
+    ? (totalPnl * avgLeverage / totalNotional) * 100
+    : (totalMargin ? (totalPnl / totalMargin) * 100 : 0);
+  return {
+    count: positions.length,
+    totalPnl,
+    totalMargin,
+    roi,
+    positions,
+  };
+}
+
+/**
+ * Realised performance, read from the EXCHANGE rather than our own table.
+ *
+ * The `trades` table is only written by openFromSignal, so it contains bot
+ * entries and nothing else. Anything opened by hand, opened before this bot
+ * ran, or opened while auto_trade was off is invisible to it — which is why
+ * /pnl read 0 trades and +0.00 PnL on an account that had actually traded.
+ *
+ * get_history_positions is the account's own record and covers all of it.
+ * Fields (PositionHistoryResp): realizedPNL, fee, funding, ctime, mtime.
+ *
+ * The documented semantics (get_history_positions response table):
+ *   realizedPNL  "Realized PnL(exclude funding fee and transaction fee)"
+ *   fee         "Deducted transaction fees ... during the position" — positive
+ *               is a cost taken out of the position
+ *   funding     "total funding fee during the position" — negative is paid by
+ *               the position, positive is received
+ * So the account's true result is realizedPNL - fee + funding. The fee is
+ * reported on its own line as well, because it is the part of the cost the bot
+ * actually controls (position size and trade frequency).
+ */
+export async function exchangePerformance(days = 7, { symbol = null } = {}) {
+  const endTime = Date.now();
+  const startTime = endTime - days * 86_400_000;
+
+  const rows = [];
+  const PAGE = 100;
+  for (let skip = 0; skip < 1000; skip += PAGE) {
+    let page;
+    try {
+      page = await bitunix.getHistoryPositions({ symbol, startTime, endTime, skip, limit: PAGE });
+    } catch (e) {
+      if (!rows.length) throw e;      // nothing at all: let the caller report it
+      break;                          // partial data is still worth showing
+    }
+    const list = Array.isArray(page) ? page : (page?.positionList || []);
+    if (!list.length) break;
+    rows.push(...list);
+    if (list.length < PAGE) break;
+  }
+
+  // the window filter is applied server-side, but closed-at can be null on a
+  // partially closed position, so keep only rows that really closed in range
+  const closed = rows.filter((r) => {
+    const t = Number(r.mtime || r.ctime || 0);
+    return t >= startTime && t <= endTime;
+  });
+
+  let pnl = 0; let fees = 0; let funding = 0; let wins = 0; let losses = 0;
+  for (const r of closed) {
+    const p = Number(r.realizedPNL || 0);
+    pnl += p;
+    fees += Number(r.fee || 0);
+    funding += Number(r.funding || 0);
+    if (p > 0) wins++; else if (p < 0) losses++;
+  }
+
+  return {
+    source: 'exchange',
+    days,
+    trades: closed.length,
+    wins,
+    losses,
+    pnl,
+    fees,
+    funding,
+    // realizedPNL EXCLUDES fee and funding, so the account's true result is
+    // realizedPNL - fee + funding. Adding the fee back instead of subtracting it
+    // overstates performance by twice the commission — the direction that
+    // flatters the account, and the same formula manager.js uses when it books a
+    // closed position, so the two paths must agree.
+    net: pnl - fees + funding,
+  };
+}

@@ -1,0 +1,10 @@
+# Railway/Nixpacks build. `engines.node` in package.json is a range, which
+# Nixpacks cannot resolve to a single derivation — pin it here instead.
+[phases.setup]
+nixPkgs = ["nodejs_22"]
+
+[phases.install]
+cmds = ["npm ci --omit=dev || npm install --omit=dev"]
+
+[start]
+cmd = "npm start"
