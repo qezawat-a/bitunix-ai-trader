@@ -256,22 +256,29 @@ export async function openFromSignal(signal, { aiVerdict = null, marginOverride 
     if (probe.liqUnsafe) {
       return { ok: false, reason: 'refusing ' + symbol + ': at ' + leverage + 'x liquidation sits at the entry price - lower /set leverage' };
     }
+    // Leverage is the operator's setting. It is NOT lowered here to fit the ATR
+    // stop: the old `Math.min(leverage, safeLev)` silently cut e.g. 40x to 10-20x
+    // on pairs whose exchange limit is 40x. The only things allowed to lower it
+    // are the exchange's own limits (pair min/max, tier cap), already applied by
+    // ensureSymbolConfig() and read back above. Liquidation safety is kept by
+    // pulling the STOP inside liquidation (computeDynamicTpSl -> clampStopInsideLiq)
+    // and by the liqUnsafe refusal above - never by shrinking the position.
     const safeLev = probe.maxSafeLeverage;
-    leverage = Math.min(leverage, safeLev);
+    if (leverage > safeLev) {
+      log.info(symbol + ': keeping ' + leverage + 'x (ATR-stop ceiling would be ' + safeLev + 'x); stop is clamped inside liquidation instead');
+    }
 
     // With C = available balance, the lowest leverage that keeps the order
-    // inside the balance is levForBudget = minNominal / C. The open is safe
-    // only when levForBudget <= safeLev; otherwise the minimum order cannot be
-    // opened with the funds available, and "insufficient balance" is the wrong
-    // message - the right message names the levers the operator controls.
+    // inside the balance is levForBudget = minNominal / C. If that is above the
+    // leverage we hold, the minimum order cannot be opened with the funds
+    // available - refuse and name the levers the operator controls.
     const levForBudget = minNominal > 0 ? minNominal / available : 0;
-    if (levForBudget > 0 && levForBudget > safeLev) {
+    if (levForBudget > 0 && levForBudget > leverage) {
       return {
         ok: false,
-        reason: symbol + ': minimum order ' + minQty + ' (' + minNominal.toFixed(2) + ' USDT) cannot be opened at ' + available.toFixed(2) + ' USDT balance at a safe leverage - raise margin_pct, raise leverage, or skip'
+        reason: symbol + ': minimum order ' + minQty + ' (' + minNominal.toFixed(2) + ' USDT) cannot be opened at ' + available.toFixed(2) + ' USDT balance at ' + leverage + 'x - raise margin_pct, raise leverage, or skip'
       };
     }
-    if (levForBudget > 0) leverage = Math.max(leverage, levForBudget);
 
     const minMargin = minMarginForMinOrder({ price, minTradeVolume: minQty, leverage, precision });
     marginUsdt = Math.max(marginUsdt, minMargin);
