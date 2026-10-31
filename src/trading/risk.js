@@ -1,0 +1,596 @@
+import { settings } from '../db/index.js';
+
+/**
+ * FULLY DYNAMIC TP/SL — no static percentages anywhere, no min/max clamps in settings.
+ *
+ * Stop distance  = ATR * k_sl
+ *   k_sl shrinks when the signal is strong and the market is orderly,
+ *   widens in volatile / low-conviction conditions.
+ *
+ * Reward:risk    = f(signal strength, agreement, regime)
+ *   a 100-confidence 6-strategy trend signal is allowed to run much further
+ *   than a barely-qualified 2-strategy range signal.
+ *
+ * Everything below is derived per-signal at runtime.
+ */
+
+const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+
+/**
+ * Maintenance margin rate fallback.
+ *
+ * The authoritative source is GET /api/v1/futures/position/get_position_tiers,
+ * which returns maintenanceMarginRate per position-value band. Use
+ * bitunix.tierFor({symbol, notional}) and pass the result in as `mmr`.
+ *
+ * This heuristic only runs when the tier lookup fails (network, new listing).
+ * It over-states MMR on every pair measured — BTC real tier-1 is 0.30% and
+ * this returns 0.50%, SOL real 0.50% against 1.00% here — which places
+ * liquidation closer to entry than reality. That is the safe direction to be
+ * wrong in, but it does needlessly cap leverage, so it is a fallback and not
+ * the main path.
+ */
+export function mmrFor(maxLeverage) {
+  const maxLev = Number(maxLeverage);
+  if (!(maxLev > 0)) return 0.005;
+  return clamp(1 / maxLev, 0.004, 0.05);
+}
+
+/**
+ * Estimate the liquidation price BEFORE the position exists.
+ *
+ * Bitunix help centre, "Forced Liquidation in Futures Trading":
+ *
+ *   Liq = Entry x [1 - (Margin - Margin x Lev x MMR) / (Margin x Lev)]
+ *
+ * Margin cancels out, leaving the standard published form:
+ *
+ *   Long  : Liq = Entry x (1 - 1/Lev + MMR)
+ *   Short : Liq = Entry x (1 + 1/Lev - MMR)
+ *
+ * Verified against the doc's worked example: entry 100000, 100x, MMR 0.5%
+ * -> 100000 x (1 - 0.01 + 0.005) = 99500. This simplified form is
+ * algebraically identical to the doc's full expression, in which the Margin
+ * terms cancel exactly: (Margin - Margin*Lev*MMR)/(Margin*Lev) = 1/Lev - MMR.
+ *
+ * CROSS margin liquidates later than this, because the whole account balance
+ * backs the position. Using the isolated formula for both modes therefore
+ * under-states the distance to liquidation, which is the safe error to make.
+ *
+ * Fees and funding are excluded here exactly as they are in the doc. They move
+ * liquidation closer over time, which is why clampStopInsideLiq keeps a buffer.
+ */
+export function estimateLiqPrice({ side, entry, leverage, mmr = 0.005 }) {
+  const lev = Math.max(1, Number(leverage) || 1);
+  const imr = 1 / lev;
+  const e = Number(entry);
+  const liq = side === 'LONG' ? e * (1 - imr + Number(mmr)) : e * (1 + imr - Number(mmr));
+  // At leverage >= 1/MMR the maintenance requirement swallows the entire
+  // margin and liquidation sits at or through entry. No stop survives that;
+  // return entry so the caller refuses the trade.
+  if (side === 'LONG' && liq >= e) return e;
+  if (side === 'SHORT' && liq <= e) return e;
+  return liq;
+}
+
+/**
+ * Pull a stop back inside the liquidation price.
+ *
+ * A stop beyond liquidation is not a stop — the exchange closes the position
+ * first and takes the whole margin. The stop must sit in front of liq with
+ * room to spare, because liq itself drifts (funding, fees, mark-vs-last).
+ */
+export function clampStopInsideLiq({ side, entry, slPrice, liqPrice, buffer = null }) {
+  if (!liqPrice || !Number.isFinite(liqPrice)) return { slPrice, adjusted: false };
+  // liq_distance is the user-facing control for this; 0.25 was the old fixed
+  // constant. Reading it here means one /set changes every clamp in the system.
+  if (buffer == null) buffer = Number(settings().liq_distance ?? 0.5);
+  buffer = clamp(Number(buffer), 0.05, 0.9);
+  const isLong = side === 'LONG';
+  const e = Number(entry);
+  const stop = Number(slPrice);
+
+  // A stop sitting on the PROFIT side of entry is already in front of
+  // liquidation — it can never be reached by price without the position being
+  // closed first. This guard exists for stops on the LOSING side only.
+  //
+  // It used to measure |entry - stop| and pull in anything "too far", without
+  // asking which side of entry it was on. A breakeven or trailing stop on a
+  // winner is always farther from entry than the liquidation distance, so every
+  // one of them was rewritten to exactly `entry - maxDist` — a fixed level just
+  // inside liq that is BELOW entry and below the breakeven it was meant to
+  // protect. The recomputed value never changed, so the write "succeeded",
+  // the ratchet saw no improvement on the next pass, and the stop sat at the
+  // original wide level forever while breakeven_threshold and
+  // trailing_trigger_roi_pct appeared to do nothing.
+  if ((isLong && stop >= e) || (!isLong && stop <= e)) {
+    return { slPrice, adjusted: false };
+  }
+
+  const liqDist = Math.abs(e - Number(liqPrice));
+  // keep the stop at most (1 - buffer) of the way to liquidation
+  const maxDist = liqDist * (1 - buffer);
+  const wantDist = Math.abs(e - stop);
+  if (wantDist <= maxDist) return { slPrice, adjusted: false };
+  const safe = isLong ? e - maxDist : e + maxDist;
+  return {
+    slPrice: safe,
+    adjusted: true,
+    reason: `stop was ${wantDist.toFixed(6)} from entry but liquidation is only `
+      + `${liqDist.toFixed(6)} away; pulled in to ${maxDist.toFixed(6)}`,
+  };
+}
+
+/**
+ * The largest leverage at which this signal's ATR stop still fits inside
+ * liquidation with the safety buffer intact. Used to refuse or de-lever a
+ * trade instead of opening one that can only end in liquidation.
+ */
+export function maxSafeLeverage({ entry, slDist, mmr = 0.005, buffer = null }) {
+  if (buffer == null) buffer = Number(settings().liq_distance ?? 0.5);
+  buffer = clamp(Number(buffer), 0.05, 0.9);
+  // Solve |entry - liq| >= slDist / (1 - buffer) for leverage, using the
+  // published liq formula: |entry - liq| = entry * (1/lev - MMR).
+  const needed = Number(slDist) / (1 - buffer);        // required liq distance
+  const frac = needed / Number(entry);                 // as a fraction of price
+  const lev = 1 / (frac + Number(mmr));
+  return Math.max(1, Math.floor(lev));
+}
+
+/**
+ * Which risk tier a position of this notional value falls into.
+ *
+ * Bands come from get_position_tiers and do not necessarily cover every value
+ * a position can reach, so the lookup degrades deliberately:
+ *
+ *   - inside a band      -> that band
+ *   - below the first    -> the first band
+ *   - above EVERY band   -> the TOP band
+ *
+ * The last case matters: a position larger than the top tier is the MOST
+ * exposed one there is, so it must resolve to the top tier rather than to
+ * "no tier". Resolving it to nothing would make reductionLadder() report no
+ * cascade and inReductionZone() report "safe" for precisely the position the
+ * exchange would come after first.
+ *
+ * Pure and synchronous — tierFor() in the exchange client delegates here so
+ * the MMR used to size a stop and the MMR used to model a reduction can never
+ * come from two different notions of the same band.
+ */
+export function tierAt(tiers, notional) {
+  const list = Array.isArray(tiers) ? tiers : [];
+  if (!list.length) return null;
+  const v = Number(notional) || 0;
+  const sorted = [...list].sort((a, b) => Number(a.startValue) - Number(b.startValue));
+  return sorted.find((t) => v > Number(t.startValue) && v <= Number(t.endValue))
+    || sorted.find((t) => v <= Number(t.endValue))
+    || sorted[sorted.length - 1];
+}
+
+/**
+ * The tiered risk-limit cascade Bitunix runs BEFORE a forced liquidation.
+ *
+ * Liquidation is not a single event. Per the help-centre article
+ * "Bitunix Futures Liquidation Mechanism and Tiered Risk Limit", when a
+ * position falls short of its maintenance margin the exchange:
+ *
+ *   1. cancels open orders to release margin,
+ *   2. if still short AND the position sits above tier 1, PARTIALLY closes it
+ *      to drop it into the tier below — the P&L credits straight to balance,
+ *      the leg is sent FOK, and an FOK that fails liquidates the whole
+ *      position,
+ *   3. repeats until the position is back inside its margin requirement,
+ *   4. liquidates outright only once it is already at tier 1.
+ *
+ * The reduction is documented with one worked example:
+ *
+ *   "the user holds a position with the value of 5,000,000 USDT and the risk
+ *    limit tier is 4 ... Reduced Value = Position Value - Limit Amount of the
+ *    Original Level, namely 5,000,000 - 2,500,000 = 2,500,000 USDT"
+ *
+ * The "Limit Amount of the Original Level" is the floor of the current tier,
+ * i.e. the ceiling of the tier below it. So one step down is simply:
+ *
+ *   newNotional = tier.startValue
+ *
+ * This matters to the bot because a position above tier 1 is not "safe until
+ * the liquidation price" — it is exposed to the exchange closing chunks of it
+ * at market first, while the software stop is still untouched. The stop is
+ * sized for the FULL position; after a reduction the order-level tp/sl rows
+ * still carry the pre-reduction slQty and no longer match what is left.
+ *
+ * Returns the ladder of steps, nearest tier first. An empty array means the
+ * position is already at the bottom tier (tier 1), where the next step is
+ * full liquidation rather than a reduction.
+ *
+ * @param tiers  position tiers from get_position_tiers, ascending by startValue
+ * @param notional  position value in USDT
+ */
+export function reductionLadder(tiers, notional) {
+  const v = Number(notional) || 0;
+  if (!Array.isArray(tiers) || !tiers.length || !(v > 0)) return [];
+
+  const ladder = [];
+  // Each step recomputes the tier from the reduced notional, exactly as the
+  // exchange does after every reduction.
+  let current = v;
+  const seen = new Set();
+  for (let guard = 0; guard < tiers.length + 1; guard++) {
+    const t = tierAt(tiers, current);
+    if (!t || t.level <= 1 || seen.has(t.level)) break;
+    seen.add(t.level);
+    const next = Number(t.startValue);
+    if (!(next > 0) || next >= current) break;
+    const below = tiers.find((x) => x.level === t.level - 1) || null;
+    ladder.push({
+      fromLevel: t.level,
+      toLevel: below ? below.level : t.level - 1,
+      fromNotional: current,
+      toNotional: next,
+      closesNotional: current - next,
+      // The MMR that applied is what made the position short of margin; the
+      // reduced leg is what the exchange will actually leave behind.
+      fromMmr: Number(t.mmr),
+      toMmr: below ? Number(below.mmr) : null,
+      // FOK, and a failed FOK liquidates the entire position.
+      orderType: 'FOK',
+    });
+    current = next;
+  }
+  return ladder;
+}
+
+/**
+ * Is this position exposed to a forced partial reduction before liquidation?
+ *
+ * True whenever the position sits above tier 1 for its notional. It is not a
+ * prediction that it will happen — it says that IF margin runs short, the
+ * exchange closes part of the position at market before liquidating any of
+ * it, so any software stop sized for the whole position goes stale the moment
+ * a leg is taken.
+ */
+export function inReductionZone(tiers, notional) {
+  return reductionLadder(tiers, notional).length > 0;
+}
+
+/**
+ * Choose a target from what the tape is actually doing, instead of a fixed
+ * multiple of the stop.
+ *
+ * A fixed R target has one failure mode in each direction: in chop it asks for
+ * a move that is not coming, and in a real trend it hands back the part of the
+ * move that pays for all the losers. On 20x a 3R target is roughly 100% ROI
+ * and the trade is closed — a 25% price run that would have been 500% never
+ * gets the chance.
+ *
+ * So the target widens only when there is evidence to justify it:
+ *
+ *   strong trend, expanding range   -> NO fixed target; the trailing stop
+ *                                      decides when the move is over
+ *   trend, but ordinary             -> wide R, scaled by trend strength
+ *   squeeze breaking out            -> the measured move (the coiled range
+ *                                      projected from the break)
+ *   range                           -> the opposite band, and nothing beyond;
+ *                                      a range is the one place a runner is
+ *                                      simply wrong
+ *   weak / no trend                 -> tight, take what is there
+ *
+ * Returns { tpPrice|null, rr, basis }. A null tpPrice means "let it run" and
+ * the caller must ensure a trailing stop is active, otherwise the position has
+ * no exit at all.
+ */
+export function adaptiveTarget({
+  side, price, slDist, regime, adx = 0, atrExpansion = 1,
+  donHigh = null, donLow = null, trailingEnabled = true,
+}) {
+  const isLong = side === 'LONG';
+  const aligned = isLong ? regime === 'TREND_UP' : regime === 'TREND_DOWN';
+  const rrTo = (target) => Math.abs(target - price) / slDist;
+  const mk = (target, basis) => ({ tpPrice: target, rr: rrTo(target), basis });
+
+  // --- 1. the runner ------------------------------------------------------
+  // Strong directional trend AND a range that is still opening up. Both are
+  // required: high ADX on a contracting range is a trend running out of fuel.
+  if (aligned && adx >= 30 && atrExpansion >= 1.15) {
+    if (trailingEnabled) {
+      return { tpPrice: null, rr: null, basis: `trend ADX ${adx.toFixed(0)}, range expanding ${atrExpansion.toFixed(2)}x — no fixed target, trailing it` };
+    }
+    // Without a trailing stop an open-ended target is an open-ended position.
+    const t = isLong ? price + slDist * 8 : price - slDist * 8;
+    return mk(t, `strong trend but trailing is off — capped at 8R`);
+  }
+
+  // --- 2. range: the other side of the box, never past it -----------------
+  if (regime === 'RANGE' && donHigh != null && donLow != null) {
+    const band = isLong ? donHigh : donLow;
+    const rr = rrTo(band);
+    // if the band is closer than the stop the trade is not worth taking on
+    // structure alone; fall back to a modest multiple
+    if (rr >= 1.2) return mk(band, `range — opposite band at ${band.toFixed(6)}`);
+    return mk(isLong ? price + slDist * 1.5 : price - slDist * 1.5, 'range, band too close — 1.5R');
+  }
+
+  // --- 3. squeeze break: the measured move --------------------------------
+  if (regime === 'SQUEEZE' && donHigh != null && donLow != null) {
+    const height = donHigh - donLow;
+    if (height > 0) {
+      const t = isLong ? price + height : price - height;
+      const rr = rrTo(t);
+      if (rr >= 1.5) return mk(t, `squeeze — measured move ${height.toFixed(6)}`);
+    }
+  }
+
+  // --- 4. trending, ordinary ----------------------------------------------
+  if (aligned) {
+    // ADX 22 -> 3R, ADX 30 -> 5R, flattening off above that
+    const rr = clamp(3 + (adx - 22) * 0.25, 3, 5);
+    return mk(isLong ? price + slDist * rr : price - slDist * rr,
+      `trend ADX ${adx.toFixed(0)} — ${rr.toFixed(1)}R`);
+  }
+
+  // --- 5. nothing to lean on ----------------------------------------------
+  const rr = adx < 20 ? 1.5 : 2.2;
+  return mk(isLong ? price + slDist * rr : price - slDist * rr,
+    `no aligned trend (ADX ${adx.toFixed(0)}) — ${rr}R`);
+}
+
+/**
+ * Which ATR stop/target distances scale to?
+ *
+ * One policy, shared by the executor's initial bracket and the guard's
+ * trailing engine. The bug this exists for (2026-10-07, measured live):
+ * TIMEFRAMES=1m,3m,5m,15m and the FIRST timeframe sizes the bracket.
+ * 1m ATR is noise-level (BTC measured 0.052% of price), so SL came out
+ * ~0.09% and TP ~0.14% — inside the 0.08–0.10% taker round trip. Fifty
+ * closes later: 38 at PnL≈0, net +0.17 USDT. The account paid commission.
+ *
+ * Contract:
+ *   input : signal (signal.atr + signal.timeframes {[tf]: {atr, ...}}), settings
+ *   output: { atr: <number> to size distances with, tf: '<tf>' it came from }
+ *   policy: size off a STRUCTURE timeframe, not the execution one; walk the
+ *           configured list to the first TF with a valid ATR; fall back to
+ *           signal.atr when nothing is valid.
+ */
+export function stopAtrFor(signal, s) {
+  // Size off the first STRUCTURE timeframe: the first configured TF AFTER the
+  // execution one (the first entry) that produced a valid ATR. A TF whose
+  // candles failed is absent from signal.timeframes and is skipped. With none
+  // valid, fall back to the execution ATR.
+  const tfs = String(s?.timeframes || '1m').split(',').map((x) => x.trim()).filter(Boolean);
+  const exec = tfs[0] || '1m';
+  for (const tf of tfs.slice(1)) {
+    const a = Number(signal.timeframes?.[tf]?.atr);
+    if (Number.isFinite(a) && a > 0) return { atr: a, tf };
+  }
+  return { atr: Number(signal.atr) || 0, tf: exec };
+}
+
+export function computeDynamicTpSl(signal) {
+  const s = settings();
+  const price = Number(signal.price);
+  // Distance is sized by ONE policy (stopAtrFor), never by the raw scan ATR:
+  // the execution TF's ATR is noise-level and puts the bracket in the fee band.
+  const picked = stopAtrFor(signal, s);
+  const atr = picked.atr || Number(signal.atr);
+  const stopTf = picked.tf;
+  const conf = Number(signal.confidence);
+  const agreement = Number(signal.agreement);
+  const atrPct = price ? (atr / price) * 100 : 0;
+  const regime = signal.regime || 'RANGE';
+
+  // ---- strength score 0..1 -------------------------------------------
+  const minConf = Number(s.min_confidence || 80);
+  const confPart = clamp((conf - minConf) / (100 - minConf || 1), 0, 1);      // how far above the bar
+  const agreePart = clamp((agreement - Number(s.min_agreement || 2)) / 4, 0, 1);
+  const strength = clamp(0.55 * confPart + 0.45 * agreePart, 0, 1);
+
+  // ---- stop multiplier ------------------------------------------------
+  // base 1.5 ATR, tighter for strong signals, wider for volatile tape
+  let kSl = 1.5 - 0.35 * strength;
+  if (regime === 'VOLATILE') kSl += 0.6;
+  if (regime === 'SQUEEZE') kSl += 0.25;              // breakouts need room for the retest
+  if (regime === 'RANGE') kSl -= 0.1;
+  if (atrPct < 0.25) kSl += 0.4;                      // very quiet tape -> noise stops
+  kSl = clamp(kSl, 0.8, 3.2);
+
+  // ---- reward:risk ----------------------------------------------------
+  let rr = 1.3 + 2.2 * strength;                      // 1.3R .. 3.5R
+  if (regime === 'TREND_UP' || regime === 'TREND_DOWN') rr += 0.5;
+  if (regime === 'RANGE') rr -= 0.35;                 // take what the range gives
+  if (regime === 'VOLATILE') rr += 0.2;
+  if (signal.htfRegime && signal.side === 'LONG' && signal.htfRegime === 'TREND_UP') rr += 0.3;
+  if (signal.htfRegime && signal.side === 'SHORT' && signal.htfRegime === 'TREND_DOWN') rr += 0.3;
+  rr = clamp(rr, 1.1, 4.5);
+
+  let slDist = atr * kSl;
+
+  // A bracket inside the fee band can never pay: measured 2026-10-07, a
+  // 1m-scaled SL of ~0.09% of price on a 0.08-0.10% taker round trip, and
+  // 38 of the last 50 closes landed at PnL ~ 0. The liq clamp below may
+  // still pull a floored stop in — that is the safe direction to be wrong in.
+  const minPct = Number(s.min_stop_pct ?? 0.25);
+  if (minPct > 0) slDist = Math.max(slDist, price * (minPct / 100));
+
+  // ---- liquidation guard ----------------------------------------------
+  // An ATR stop knows nothing about leverage. At high leverage the liquidation
+  // price can sit CLOSER to entry than the stop, so the exchange liquidates
+  // first and the stop never fires. Clamp the stop inside liq, always.
+  const isLong = signal.side === 'LONG';
+  const lev = Number(signal.leverage) || Number(s.leverage) || 1;
+  const mmr = signal.mmr ?? mmrFor(signal.maxLeverage);
+  const liqPrice = signal.liqPrice
+    ?? estimateLiqPrice({ side: signal.side, entry: price, leverage: lev, mmr });
+  let liqAdjusted = false;
+  let liqNote = null;
+  // liq at/through entry: the position is unopenable at this leverage
+  const liqUnsafe = liqPrice != null
+    && (isLong ? liqPrice >= price : liqPrice <= price);
+
+  if (liqPrice) {
+    const raw = isLong ? price - slDist : price + slDist;
+    const c = clampStopInsideLiq({ side: signal.side, entry: price, slPrice: raw, liqPrice });
+    if (c.adjusted) {
+      slDist = Math.abs(price - c.slPrice);
+      liqAdjusted = true;
+      liqNote = c.reason;
+    }
+  }
+
+  const slPrice = isLong ? price - slDist : price + slDist;
+
+  // tp_mode ADAPTIVE lets the target come from the tape; FIXED_R keeps the
+  // original behaviour of a confidence-scaled multiple of the stop.
+  let tpPrice;
+  let tpBasis;
+  let effRr = rr;
+  if (String(s.tp_mode || 'ADAPTIVE').toUpperCase() === 'ADAPTIVE') {
+    const t = adaptiveTarget({
+      side: signal.side, price, slDist, regime,
+      adx: Number(signal.adx) || 0,
+      atrExpansion: Number(signal.atrExpansion) || 1,
+      donHigh: signal.donHigh ?? null,
+      donLow: signal.donLow ?? null,
+      // Read the real setting rather than hardcoding true: the "no fixed target,
+      // let it run" branch is only safe while a trailing stop is actually
+      // active. All three trailing families qualify — ATR ratchets a stop behind
+      // price, RATIO/INTERVAL arm at an activation price and then close on the
+      // callback — and all three leave an exchange-side stop on the position, so
+      // none of them can strand a position with no exit. Only a disabled trade
+      // (auto_trade=0) leaves the bracket unprotected.
+      trailingEnabled: Number(s.auto_trade ?? 1) !== 0,
+    });
+    tpPrice = t.tpPrice;
+    tpBasis = t.basis;
+    effRr = t.rr;
+  } else {
+    tpPrice = isLong ? price + slDist * rr : price - slDist * rr;
+    tpBasis = `fixed ${rr.toFixed(2)}R`;
+  }
+  const tpDist = tpPrice == null ? null : Math.abs(tpPrice - price);
+  const safeLev = maxSafeLeverage({ entry: price, slDist: atr * kSl, mmr });
+
+  return {
+    slPrice,
+    tpPrice,
+    slDist,
+    tpDist,
+    tpBasis,
+    rr: effRr == null ? null : Number(effRr.toFixed(2)),
+    liqPrice,
+    liqAdjusted,
+    liqNote,
+    liqUnsafe,
+    maxSafeLeverage: safeLev,
+    mmr,
+    atrTf: stopTf,
+    kSl: Number(kSl.toFixed(2)),
+    baseRr: Number(rr.toFixed(2)),
+    strength: Number(strength.toFixed(2)),
+    slPct: Number(((slDist / price) * 100).toFixed(3)),
+    tpPct: tpDist == null ? null : Number(((tpDist / price) * 100).toFixed(3)),
+    explain: `ATR ${atr.toFixed(6)} (${stopTf}) x ${kSl.toFixed(2)} stop, `
+      + (tpPrice == null ? 'NO fixed target (trailing)' : `${effRr.toFixed(2)}R target`)
+      + ` — ${tpBasis} (strength ${(strength * 100).toFixed(0)}%, regime ${regime})`
+      + (liqAdjusted ? ` — STOP PULLED INSIDE LIQUIDATION: ${liqNote}` : ''),
+  };
+}
+
+/**
+ * The breakeven stop: entry shifted by a round-turn fee buffer, so the position
+ * closes at 0 instead of paying commission to end flat.
+ *
+ * Extracted from trailingStop() so the RATIO/INTERVAL trailing families can use
+ * the same floor. They used to jump straight from the wide entry stop to the
+ * trailing stop, leaving a band between breakeven_threshold and
+ * trailing_trigger_roi_pct where a winner could round-trip back through entry
+ * and close at a loss — the ATR family was protected and these were not.
+ */
+export function breakevenStop({ side, entry, liqPrice = null }) {
+  const isLong = side === 'LONG';
+  // Round-turn fee buffer: 0.08% of entry covers both legs at the documented
+  // 0.05% maker / 0.06% taker rates without assuming which one filled.
+  const feeBuffer = entry * 0.0008;
+  let stop = isLong ? entry + feeBuffer : entry - feeBuffer;
+  let reason = 'breakeven';
+
+  // Never hand the exchange a stop behind liquidation, even a breakeven one:
+  // on a position already deep in loss, breakeven can be the wrong side of liq.
+  if (liqPrice) {
+    const c = clampStopInsideLiq({ side, entry, slPrice: stop, liqPrice });
+    if (c.adjusted) { stop = c.slPrice; reason += ' (clamped inside liq)'; }
+  }
+  return { stop, reason };
+}
+
+/**
+ * Trailing stop level once the position is in profit.
+ * Uses the same ATR engine, ratcheting behind price.
+ */
+export function trailingStop({ side, entry, currentPrice, atr, roiPct, leverage, liqPrice }) {
+  const s = settings();
+  // ?? not ||: 0 is a legitimate "arm immediately" value for either threshold
+  // and must not be silently replaced by the default.
+  const beThreshold = Number(s.breakeven_threshold ?? 8);        // ROI %
+  const trailTrigger = Number(s.trailing_trigger_roi_pct ?? 12);  // ROI %
+  const isLong = side === 'LONG';
+
+  // ROI here is leveraged return on margin, matching what the exchange UI shows
+  if (!(roiPct >= beThreshold)) return null;
+
+  let { stop, reason } = breakevenStop({ side, entry, liqPrice });
+
+  // A trail is only meaningful with a positive ATR. Passing null/0 into the
+  // arithmetic used to produce `currentPrice - 0` (i.e. a stop at the market,
+  // which fires immediately) when ROI was above the trigger. With no ATR we
+  // stay at the breakeven floor — protective, and never looser than before.
+  const a = Number(atr);
+  if (roiPct >= trailTrigger && Number.isFinite(a) && a > 0) {
+    // Trail a fixed distance behind price, in ATR. This used to be a hidden
+    // curve (1.2 ATR tightening to 0.5 as profit grew) that the user could
+    // neither see nor change — now it is one setting that means exactly what
+    // it says.
+    const k = clamp(Number(s.trailing_distance_atr ?? 0.5), 0.1, 5);
+    const trail = isLong ? currentPrice - a * k : currentPrice + a * k;
+    if ((isLong && trail > stop) || (!isLong && trail < stop)) {
+      stop = trail;
+      reason = `trailing ${k} ATR`;
+    }
+  } else if (roiPct >= trailTrigger) {
+    // No usable ATR: stay on the breakeven floor. The reason is exactly
+    // "breakeven" so callers that compare the floor reason keep working.
+    reason = 'breakeven';
+  }
+
+  return { stop, reason };
+}
+
+/** Position sizing: margin_pct of available balance (order unit = COST/USDT). */
+export function computeMargin({ available, marginPct, openPositions, maxPositions }) {
+  const pct = Number(marginPct) / 100;
+  let margin = Number(available) * pct;
+  // never let the book exceed what the remaining slots can carry
+  const slotsLeft = Math.max(1, Number(maxPositions) - Number(openPositions));
+  const cap = Number(available) / slotsLeft;
+  if (margin > cap) margin = cap;
+  return Math.max(0, margin);
+}
+
+/** Minimum position value (notional) the exchange will accept for a symbol:
+ * the minimum order quantity in base coins, rounded up to `precision` digits,
+ * multiplied by the last price. Rounded up so that, after `roundQty` floors to
+ * `precision` digits, the order still clears the exchange's minimum. */
+export function minOrderNotional({ price, minTradeVolume, precision = 4 }) {
+  const f = Math.pow(10, Number(precision) || 4);
+  const minQty = Math.ceil(Number(minTradeVolume) * f) / f;
+  return minQty * Number(price);
+}
+
+/**
+ * Margin (USDT) needed so that qty = minTradeVolume at the given leverage,
+ * assuming qty is rounded down to `precision` base coins.
+ *   qty = margin * leverage / price  =>  minMargin = minTradeVolume * price / leverage
+ */
+export function minMarginForMinOrder({ price, minTradeVolume, leverage, precision = 4 }) {
+  return minOrderNotional({ price, minTradeVolume, precision }) / Number(leverage);
+}
+
