@@ -7,6 +7,8 @@ import agent from '../ai/agent.js';
 import { loadSkillFiles, SKILLS_DIR } from '../ai/soul.js';
 import { mcpStatus, reloadMcpTools, allTools } from '../ai/tools.js';
 import { createLogger } from '../logger.js';
+import { diagnose } from '../ai/diagnose.js';
+import { getProposal, listProposals, applyProposal, rejectProposal, rollbackProposal, restartProcess } from '../ai/repair.js';
 import { config } from '../config.js';
 import * as db from '../db/index.js';
 import { scan, analyseSymbol, consensus } from '../scanner/scanner.js';
@@ -49,6 +51,82 @@ export function createCommandHandler(ctx) {
   const reply = (chatId, text, extra) => bot.sendMessage(chatId, text, extra);
 
   const commands = {
+    // ------------------------------------------------- diagnose & self-repair
+    // Nothing here changes code on its own: the agent can only PROPOSE a fix
+    // (propose_code_fix); /approve is the single place a proposal is applied.
+    async diagnose(chatId, args) {
+      const sym = args[0] ? String(args[0]).toUpperCase() : null;
+      const d = await diagnose({ symbol: sym });
+      if (d.noPositionsTraced) {
+        return reply(chatId, [
+          bold('🩺 Diagnose'),
+          md(`No open position has been evaluated by the guard${sym ? ` for ${sym}` : ''} since this process started.`),
+          md(`Recent failure events: ${d.recentFailureEvents.length}, warn/error logs: ${d.recentWarnErrorLogs.length}.`),
+          '', italic('Ask me in plain words why something did not happen and I will dig into the evidence.'),
+        ].join('\n'));
+      }
+      const lines = [bold('🩺 Diagnose')];
+      for (const p of d.positions) {
+        lines.push('', bold(`${p.symbol} ${p.side}`) + md(`  ·  checked ${p.lastPassSecondsAgo}s ago  ·  ${p.category}`));
+        lines.push(md(p.headline));
+        for (const r of p.reasons) lines.push(md('• ' + r));
+      }
+      const fails = d.recentFailureEvents.slice(0, 4);
+      if (fails.length) {
+        lines.push('', bold('Recent failures'));
+        for (const e of fails) lines.push(md(`• ${e.kind}${e.symbol ? ' ' + e.symbol : ''}: ${JSON.stringify(e.payload).slice(0, 160)}`));
+      }
+      if (d.positions.some((p) => p.category === 'possible_code_bug')) {
+        lines.push('', italic('This looks like a code problem. Tell me to investigate and I will propose a fix for your approval.'));
+      }
+      return reply(chatId, lines.join('\n'));
+    },
+
+    async repairs(chatId) {
+      const rows = await listProposals(10);
+      if (!rows.length) return reply(chatId, md('No repair proposals yet.'));
+      return reply(chatId, [bold('🛠 Repair proposals'), ...rows.map((r) => md(`#${r.id} [${r.status}] ${r.title}`)),
+        '', italic('/repair <id> shows the diff · /approve <id> · /reject <id> · /rollback <id>')].join('\n'));
+    },
+
+    async repair(chatId, args) {
+      const p = await getProposal(args[0]);
+      if (!p) return reply(chatId, md('Usage: /repair <id>'));
+      const body = String(p.diff).slice(0, 3200).replace(/[`\\]/g, '\\$&');
+      return reply(chatId, [bold(`🛠 #${p.id} [${p.status}] ${p.title}`), md(p.diagnosis.slice(0, 700)), '', '```\n' + body + '\n```',
+        p.status === 'pending' ? italic(`/approve ${p.id}  ·  /reject ${p.id}`) : ''].join('\n'));
+    },
+
+    async approve(chatId, args) {
+      const id = args[0];
+      if (!id) return reply(chatId, md('Usage: /approve <id> [push]'));
+      await reply(chatId, italic('Applying, then running the test suite - this can take a minute…'));
+      const r = await applyProposal(id, { push: args[1] === 'push' });
+      if (!r.ok) {
+        return reply(chatId, [bold(`❌ #${id} NOT applied - tests got worse, files restored`),
+          md(`failed suites before ${r.before.failed}, after ${r.after.failed}`), '```\n' + String(r.after.tail).slice(-1200).replace(/[`\\]/g, '\\$&') + '\n```'].join('\n'));
+      }
+      return reply(chatId, [bold(`✅ #${id} applied`), md(`files: ${r.files.join(', ')}`),
+        md(`tests: ${r.after.failed} failing (was ${r.before.failed})`), md(`git: ${r.git.note}${r.git.commit ? ' ' + r.git.commit : ''}`),
+        '', md('The fix is on disk but the running process still has the OLD code. /restart loads it (needs `npm run start:guarded`, systemd or pm2 to bring it back; open positions keep their exchange-side stops).'),
+        md(`/rollback ${id} undoes it.`)].join('\n'));
+    },
+
+    async reject(chatId, args) {
+      await rejectProposal(args[0]);
+      return reply(chatId, md(`Proposal #${args[0]} rejected. Nothing was changed.`));
+    },
+
+    async rollback(chatId, args) {
+      const r = await rollbackProposal(args[0]);
+      return reply(chatId, [bold(`⏪ #${args[0]} rolled back`), md(`restored: ${r.files.join(', ')}`), md('/restart to load the restored code.')].join('\n'));
+    },
+
+    async restart(chatId) {
+      await reply(chatId, md('Restarting now. If no supervisor is running (start:guarded / systemd / pm2) I will stay down - start me again by hand.'));
+      restartProcess();
+    },
+
     // ------------------------------------------------------------ lifecycle
     async start(chatId) {
       const s = db.settings();

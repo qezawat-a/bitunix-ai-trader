@@ -141,3 +141,22 @@ CREATE TABLE IF NOT EXISTS sessions (
   last_resumed  TIMESTAMPTZ
 );
 CREATE INDEX IF NOT EXISTS sessions_chat_idx ON sessions (chat_id, last_resumed DESC NULLS LAST, created_at DESC);
+
+
+-- ============================================================
+--  Repair proposals — code fixes the agent proposes. Nothing is applied
+--  until the operator approves from Telegram (/approve <id>).
+-- ============================================================
+CREATE TABLE IF NOT EXISTS repair_proposals (
+  id           BIGSERIAL PRIMARY KEY,
+  status       TEXT NOT NULL DEFAULT 'pending',   -- pending | applied | rejected | failed | rolled_back
+  title        TEXT NOT NULL,
+  diagnosis    TEXT NOT NULL,
+  edits        JSONB NOT NULL,                    -- [{ path, old_str, new_str }]
+  diff         TEXT NOT NULL,
+  proposed_by  TEXT DEFAULT 'agent',
+  result       JSONB,
+  created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+  decided_at   TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS repair_proposals_status_idx ON repair_proposals (status, id DESC);

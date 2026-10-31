@@ -2,6 +2,7 @@ import bitunix from '../exchange/bitunix.js';
 import feed from '../exchange/ws.js';
 import { config } from '../config.js';
 import { createLogger } from '../logger.js';
+import { recordGuard, forgetGuard } from './trace.js';
 import { trailingStop, breakevenStop, computeDynamicTpSl, stopAtrFor } from './risk.js';
 import {
   trailingStep, resetTrailing, trailingSnapshot, evaluateAccountTpSl, closeEverything,
@@ -140,7 +141,7 @@ export async function manageOpenPositions({ notify = null } = {}) {
 
   const liveIds = new Set(positions.map((p) => String(p.positionId)));
   for (const id of Object.keys(trailingSnapshot())) {
-    if (!liveIds.has(id)) resetTrailing(id);
+    if (!liveIds.has(id)) { resetTrailing(id); forgetGuard(id); }
   }
 
   // ---- book positions that disappeared (TP/SL hit or manual close) ----
@@ -330,6 +331,11 @@ export async function manageOpenPositions({ notify = null } = {}) {
     // skipped the entire block, leaving a winner with no stop movement at all.
     // trailingStop() now falls back to breakeven when atr is missing, so a null
     // ATR degrades to the safe direction instead of disabling protection.
+    recordGuard(pid, p.symbol, p.side, 'gate', {
+      roi: p.roi, inProfit: p.roi > 0, price, entry: Number(p.avgOpenPrice),
+      leverage: Number(p.leverage), liqPrice: Number(p.liqPrice) || null,
+      atr: guardAtr, atrSource: Number(atr) > 0 ? 'execution-tf' : (stopPick?.atr ? 'structure-tf' : 'none'),
+    });
     if (p.roi > 0) {
       // method 3: two trailing families.
       //   ATR              — the original: breakeven, then a stop N ATR behind.
@@ -376,6 +382,11 @@ export async function manageOpenPositions({ notify = null } = {}) {
           });
         }
       }
+      recordGuard(pid, p.symbol, p.side, 'trail_eval', {
+        method: tm, roi: p.roi, breakevenThreshold: Number(s.breakeven_threshold ?? 20),
+        trailingTriggerRoi: Number(s.trailing_trigger_roi_pct ?? 25), atr: guardAtr,
+        trailStop: trail ? trail.stop : null, trailReason: trail ? trail.reason : null,
+      });
       if (trail) {
         // Ratchet against what the EXCHANGE has, not against our own memory of
         // what we wrote. `lastStop` used to be the only baseline, so once the
@@ -392,6 +403,9 @@ export async function manageOpenPositions({ notify = null } = {}) {
           : lastStop.get(pid);
         const improved = baseline == null
           || (p.side === 'LONG' ? trail.stop > baseline * 1.0002 : trail.stop < baseline * 0.9998);
+        recordGuard(pid, p.symbol, p.side, 'ratchet', {
+          wanted: trail.stop, exchangeStop, lastStopMemory: lastStop.get(pid) ?? null, baseline, improved,
+        });
         if (improved) {
           // preserve the existing take-profit, but read it off the
           // whole-position row rather than whatever row happened to be first
@@ -401,6 +415,7 @@ export async function manageOpenPositions({ notify = null } = {}) {
             symbol: p.symbol, positionId: pid, slPrice: trail.stop, tpPrice: existingTp,
             side: p.side, entry: Number(p.avgOpenPrice),
           });
+          recordGuard(pid, p.symbol, p.side, 'write', { ok: !!r.ok, reason: r.reason ?? null, exchangeSl: r.exchangeSl ?? null, wanted: trail.stop });
           if (r.ok) {
             softStops.delete(pid);
             lastStop.set(pid, trail.stop);
