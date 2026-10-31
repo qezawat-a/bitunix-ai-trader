@@ -121,7 +121,8 @@ export async function diagnose({ symbol = null, topic = 'trailing' } = {}) {
   try {
     events = (await recentEvents(80))
       .filter((e) => (!sym || e.symbol === sym || !e.symbol)
-        && /fail|error|reject|unverified|loop_error|close_failed|tpsl|stop_move/i.test(e.kind))
+        && (/fail|error|reject|unverified|loop_error|close_failed|tpsl|stop_move/i.test(e.kind)
+        || (topic !== 'trailing' && /ai_verdict|order_|position_opened/i.test(e.kind))))
       .slice(0, 12)
       .map((e) => ({ kind: e.kind, symbol: e.symbol, at: e.created_at, payload: e.payload }));
   } catch { /* DB offline: evidence is just thinner */ }

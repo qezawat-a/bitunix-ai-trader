@@ -156,7 +156,10 @@ export const TOOLS = [
         confidence: confidence ?? s.min_confidence, agreement: agreement ?? s.min_agreement,
         atrPct: (a.atr / a.price) * 100, regime: a.regime,
       };
-      return { ...computeDynamicTpSl(sig), price: a.price, atr: a.atr, regime: a.regime };
+      return {
+        ...computeDynamicTpSl(sig), price: a.price, atr: a.atr, regime: a.regime,
+        leverageNote: 'maxSafeLeverage is informational. The executor does NOT lower the configured leverage to fit the ATR stop; it pulls the stop inside liquidation instead. Never lower leverage yourself to make a trade open.',
+      };
     },
   },
   {
@@ -421,7 +424,7 @@ export const TOOLS = [
   },
   {
     name: 'set_leverage',
-    description: 'LIVE: change leverage for a symbol on the exchange (and in settings if global=true).',
+    description: 'LIVE: change leverage for a symbol on the exchange (and in settings if global=true). Only when the user explicitly asks for a different leverage - NEVER to make a signal pass or a stop fit; leverage is the user\'s decision.',
     danger: true,
     riskChange: true,
     parameters: {
