@@ -41,4 +41,12 @@ const so = summarize([
 ]);
 ok(so.stopOuts.n === 3 && so.stopOuts.reachedHalfTarget === 1 && so.stopOuts.neverWorked === 2, 'stop-outs split: went toward TP first vs never worked');
 ok(so.findings.some((f) => /Of 3 stop-outs/.test(f)), 'stop-out split finding');
+const be = summarize([
+  T({ leverage: 10, exit_price: 99.57, realized_pnl: -0.05, close_reason: 'exchange_close', mfePct: 0.5 }),   // arming 20/10 = 2% -> never
+  T({ leverage: 40, exit_price: 99.57, realized_pnl: -0.05, close_reason: 'exchange_close', mfePct: 0.6 }),   // arming 20/40 = 0.5% -> reached, still lost
+  T({ leverage: 40, exit_price: 99.57, realized_pnl: -0.05, close_reason: 'exchange_close', mfePct: 0.1 }),   // never
+], { breakevenRoi: 20 });
+ok(be.stopOuts.armedButLost === 1 && be.stopOuts.neverArmed === 2, 'breakeven arming level = ROI / leverage, split reached vs never');
+ok(be.findings.some((f) => /10x: 2\.00%, 20x: 1\.00%, 40x: 0\.50%/.test(f)), 'arming distance per leverage is stated');
+ok(be.stopOuts.bestMoveBuckets.find((b) => b.atLeastPct === 0.3).stopOuts === 2, 'best-move buckets count stop-outs by how far they went');
 console.log(`\n${passed} passed, ${failed} failed`); process.exit(failed ? 1 : 0);

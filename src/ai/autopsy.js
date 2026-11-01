@@ -1,4 +1,4 @@
-import { q } from '../db/index.js';
+import { q, settings } from '../db/index.js';
 import bitunix from '../exchange/bitunix.js';
 import { inferCloseReason } from '../trading/close-reason.js';
 
@@ -26,7 +26,7 @@ export function excursion(candles, { side, entry }) {
     : { mfePct: ((e - lo) / e) * 100, maePct: ((hi - e) / e) * 100 };
 }
 
-export function summarize(rows) {
+export function summarize(rows, opts = {}) {
   const t = rows.map((r) => {
     const entry = num(r.entry_price), exit = num(r.exit_price), sl = num(r.sl_price), tp = num(r.tp_price);
     const dir = r.side === 'LONG' ? 1 : -1;
@@ -86,12 +86,24 @@ export function summarize(rows) {
   const neverWorked = slHits.filter((x) => x.mfe < 0.15).length;
   const medMfeSl = median(slHits.map((x) => x.mfe));
 
+  // Breakeven arms at a LEVERAGED ROI %, so the price move it needs is roi / leverage.
+  const beRoi = Number(opts.breakevenRoi);
+  const armOf = (x) => (Number.isFinite(beRoi) && x.leverage > 0 ? beRoi / x.leverage : NaN);
+  const armed = slHits.filter((x) => Number.isFinite(armOf(x)) && x.mfe >= armOf(x)).length;
+  const notArmed = slHits.filter((x) => Number.isFinite(armOf(x)) && x.mfe < armOf(x)).length;
+  const bestMoveBuckets = [0.2, 0.3, 0.4].map((v) => ({ atLeastPct: v, stopOuts: slHits.filter((x) => x.mfe >= v).length }));
+
   const findings = [];
   if (t.length < 20) findings.push(`Only ${t.length} closed trades: treat every conclusion below as a lead, not proof.`);
   if (Number.isFinite(beFee)) findings.push(`In price terms (avg win ${(wMove + feePct).toFixed(2)}% / avg loss ${(lMove - feePct).toFixed(2)}%, minus ~${feePct}% round-trip fees) break-even needs a ${(beFee * 100).toFixed(0)}% win rate. Actual ${(winRate * 100).toFixed(0)}% (95% range ${(ci[0] * 100).toFixed(0)}-${(ci[1] * 100).toFixed(0)}%)${ci[1] < beFee ? ': clearly below break-even.' : ci[0] > beFee ? ': above break-even.' : ': break-even is inside that range, too few trades to call it.'}`);
   if (notW > 0 && notL > 0 && notL > notW * 1.5) findings.push(`Losing trades were bigger: avg notional ${notL.toFixed(2)} USDT on losers vs ${notW.toFixed(2)} on winners, which is why USDT losses outweigh USDT wins even though price moves favour the wins.`);
   if (medTp > 0 && avgWinMove > 0 && avgWinMove < medTp * 0.6) findings.push(`Winners are cut early: they capture ${avgWinMove.toFixed(2)}% of price on average vs a planned TP distance of ${medTp.toFixed(2)}% (${(avgWinMove / medTp * 100).toFixed(0)}%). Look at the close_reason rows below for what closes them.`);
   if (slHits.length >= 3) findings.push(`Of ${slHits.length} stop-outs: ${reachedHalf} first went at least half-way to the target (stop/trailing too slow or too tight), ${neverWorked} never got more than 0.15% in favour (entry timing/direction wrong from the first minute). Median best move before the stop: ${medMfeSl.toFixed(2)}%.`);
+  if (Number.isFinite(beRoi) && medTp > 0) {
+    const lv = [10, 20, 40].map((l) => `${l}x: ${(beRoi / l).toFixed(2)}%`).join(', ');
+    findings.push(`Breakeven arms at ${beRoi}% ROI = price move of ${lv}; the median planned TP is only ${medTp.toFixed(2)}%. Where the arming distance is at or beyond the TP, breakeven can never protect a trade before the TP/stop decides it.`);
+    if (slHits.length >= 3) findings.push(`Of ${slHits.length} stop-outs: ${armed} reached their breakeven arming level and still lost (the stop should have moved: check /diagnose), ${notArmed} never reached it.`);
+  }
   if (medSl > 0 && medSl < 0.5) findings.push(`Stops are tight: median planned stop is ${medSl.toFixed(2)}% of price, inside normal 1m-5m noise.`);
   if (losses.length && quickLosses / losses.length >= 0.5) findings.push(`${quickLosses} of ${losses.length} losses closed within 5 minutes: entries are being stopped by noise right after opening.`);
   if (lossHold && winHold && winHold < lossHold * 0.5) findings.push(`Winners are held ${winHold.toFixed(0)} min vs losers ${lossHold.toFixed(0)} min: profits are taken fast, losses are allowed to run.`);
@@ -103,7 +115,7 @@ export function summarize(rows) {
     winRate, avgWin, avgLoss, breakEvenWinRate, medianPlannedSlPct: medSl, medianPlannedTpPct: medTp,
     avgWinMovePct: avgWinMove, avgLossMovePct: avgLossMove, avgHoldWinMin: winHold, avgHoldLossMin: lossHold,
     breakEvenWinRatePriceFee: beFee, winRateCI: ci, avgNotionalWin: notW, avgNotionalLoss: notL, leverages,
-    stopOuts: { n: slHits.length, reachedHalfTarget: reachedHalf, neverWorked, medianBestMovePct: medMfeSl },
+    stopOuts: { n: slHits.length, reachedHalfTarget: reachedHalf, neverWorked, medianBestMovePct: medMfeSl, armedButLost: armed, neverArmed: notArmed, bestMoveBuckets },
     reasons, findings,
   };
 }
@@ -130,5 +142,5 @@ export async function autopsy({ days = 7, excursions = true } = {}) {
       } catch (e) { note = `candles unavailable for some trades: ${e.message}`; }
     }
   }
-  return { days: d, note, ...summarize(rows) };
+  return { days: d, note, breakevenRoi: Number(settings().breakeven_threshold), ...summarize(rows, { breakevenRoi: Number(settings().breakeven_threshold) }) };
 }
