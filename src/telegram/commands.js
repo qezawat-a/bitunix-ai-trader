@@ -96,6 +96,8 @@ export function createCommandHandler(ctx) {
         md(`avg notional win ${r.avgNotionalWin.toFixed(2)} / loss ${r.avgNotionalLoss.toFixed(2)} USDT`),
         ...(r.stopOuts.n ? [md(`stop-outs ${r.stopOuts.n}: ${r.stopOuts.reachedHalfTarget} went half-way to TP first · ${r.stopOuts.neverWorked} never worked · best move before stop (median) ${r.stopOuts.medianBestMovePct.toFixed(2)}%`)] : []),
         ...(r.stopOuts.n ? [md(`breakeven check uses TODAY's setting (${r.breakevenRoi}% ROI), not the one each trade ran with: ${r.stopOuts.armedButLost} stop-outs reached it and still lost · ${r.stopOuts.neverArmed} never reached it`), md(`stop-outs that went at least ${r.stopOuts.bestMoveBuckets.map((b) => `${b.atLeastPct}% → ${b.stopOuts}`).join(' · ')}`)] : []),
+        md(`direction: ${r.longs} LONG / ${r.shorts} SHORT`),
+        ...(r.entryContext ? [md(`entries at the extreme of the last 2h range: ${r.entryContext.chasing}/${r.entryContext.n} · median chase wins ${r.entryContext.medianChaseWins.toFixed(2)} vs losses ${r.entryContext.medianChaseLosses.toFixed(2)} (1 = bought the top / sold the bottom)`)] : []),
         '', bold('By leverage')].concat(r.leverages.slice(0, 6).map((x) => md(`• ${x.lev}: ${x.n} trades, ${x.wins} wins, PnL ${x.pnl.toFixed(4)}`)), ['', bold('By close reason')]);
       for (const x of r.reasons.slice(0, 8)) lines.push(md(`• ${x.reason}: ${x.n} trades, ${x.wins} wins, PnL ${x.pnl.toFixed(4)}, avg move ${x.avgMovePct.toFixed(2)}%`));
       lines.push('', bold('Findings'), ...r.findings.map((f) => md('• ' + f)));

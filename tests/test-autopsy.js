@@ -1,4 +1,4 @@
-import { summarize, excursion } from '../src/ai/autopsy.js';
+import { summarize, excursion, entryContext } from '../src/ai/autopsy.js';
 let passed = 0, failed = 0;
 const ok = (c, m) => { c ? (passed++, console.log(`  ok  ${m}`)) : (failed++, console.log(`  FAIL ${m}`)); };
 const T = (o) => ({ symbol: 'X', side: 'LONG', leverage: 10, entry_price: 100, exit_price: 100, sl_price: 99.7, tp_price: 100.9, realized_pnl: 0, close_reason: 'sl', opened_at: '2026-11-01T00:00:00Z', closed_at: '2026-11-01T00:03:00Z', ...o });
@@ -49,4 +49,14 @@ const be = summarize([
 ok(be.stopOuts.armedButLost === 1 && be.stopOuts.neverArmed === 2, 'breakeven arming level = ROI / leverage, split reached vs never');
 ok(be.findings.some((f) => /10x: 2\.00%, 20x: 1\.00%, 40x: 0\.50%/.test(f)), 'arming distance per leverage is stated');
 ok(be.stopOuts.bestMoveBuckets.find((b) => b.atLeastPct === 0.3).stopOuts === 2, 'best-move buckets count stop-outs by how far they went');
+const cs = [{ open: 100, high: 101, low: 99.5 }, { open: 101, high: 104, low: 100.5 }];
+const topLong = entryContext(cs, { side: 'LONG', entry: 103.9 });
+ok(topLong.chase > 0.95 && topLong.runPct > 3.8, 'long bought near the top of the range -> chase ~1');
+const botLong = entryContext(cs, { side: 'LONG', entry: 99.6 });
+ok(botLong.chase < 0.1, 'long bought near the bottom -> chase ~0');
+const botShort = entryContext(cs, { side: 'SHORT', entry: 99.6 });
+ok(botShort.chase > 0.9, 'short sold at the bottom is chasing');
+ok(entryContext([], { side: 'LONG', entry: 1 }) === null, 'no candles -> null');
+const ch = summarize(Array.from({ length: 6 }, () => T({ exit_price: 99.7, realized_pnl: -0.05, chase: 0.95, runPct: 2 })));
+ok(ch.findings.some((f) => /Entries chase the move/.test(f)) && ch.findings.some((f) => /Direction is lopsided/.test(f)), 'chasing and lopsided direction are reported');
 console.log(`\n${passed} passed, ${failed} failed`); process.exit(failed ? 1 : 0);

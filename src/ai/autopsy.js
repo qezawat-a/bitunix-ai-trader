@@ -26,6 +26,21 @@ export function excursion(candles, { side, entry }) {
     : { mfePct: ((e - lo) / e) * 100, maePct: ((hi - e) / e) * 100 };
 }
 
+/**
+ * Where was the entry inside the two hours before it? chase = 1 means a LONG
+ * bought at the top of that range (or a SHORT sold at its bottom): entering after
+ * the move already happened. runPct is the move in the trade's direction over the window.
+ */
+export function entryContext(candles, { side, entry }) {
+  const e = Number(entry);
+  if (!e || !candles?.length) return null;
+  const hi = Math.max(...candles.map((c) => c.high)), lo = Math.min(...candles.map((c) => c.low));
+  if (!(hi > lo)) return null;
+  const pos = Math.min(1, Math.max(0, (e - lo) / (hi - lo)));
+  const dir = side === 'LONG' ? 1 : -1;
+  return { chase: side === 'LONG' ? pos : 1 - pos, runPct: ((e - candles[0].open) / candles[0].open) * 100 * dir };
+}
+
 export function summarize(rows, opts = {}) {
   const t = rows.map((r) => {
     const entry = num(r.entry_price), exit = num(r.exit_price), sl = num(r.sl_price), tp = num(r.tp_price);
@@ -35,7 +50,7 @@ export function summarize(rows, opts = {}) {
       symbol: r.symbol, side: r.side, leverage: num(r.leverage),
       reason: stored === 'exchange_close' ? inferCloseReason({ side: r.side, entry, exit, sl, tp }) : stored,
       notional: num(r.qty) * entry,
-      mfe: num(r.mfePct), mae: num(r.maePct),
+      mfe: num(r.mfePct), mae: num(r.maePct), chase: num(r.chase), runPct: num(r.runPct),
       pnl: num(r.realized_pnl),
       movePct: entry && exit ? ((exit - entry) / entry) * 100 * dir : NaN,
       slPct: entry && sl ? (Math.abs(entry - sl) / entry) * 100 : NaN,
@@ -93,6 +108,15 @@ export function summarize(rows, opts = {}) {
   const notArmed = slHits.filter((x) => Number.isFinite(armOf(x)) && x.mfe < armOf(x)).length;
   const bestMoveBuckets = [0.2, 0.3, 0.4].map((v) => ({ atLeastPct: v, stopOuts: slHits.filter((x) => x.mfe >= v).length }));
 
+  const withCtx = t.filter((x) => Number.isFinite(x.chase));
+  const chasing = withCtx.filter((x) => x.chase >= 0.85).length;
+  const longs = t.filter((x) => x.side === 'LONG').length;
+  const ctx = withCtx.length ? {
+    n: withCtx.length, chasing, medianChaseWins: median(withCtx.filter((x) => x.pnl > 0).map((x) => x.chase)),
+    medianChaseLosses: median(withCtx.filter((x) => x.pnl <= 0).map((x) => x.chase)),
+    medianRunPct: median(withCtx.map((x) => x.runPct)),
+  } : null;
+
   const findings = [];
   if (t.length < 20) findings.push(`Only ${t.length} closed trades: treat every conclusion below as a lead, not proof.`);
   if (Number.isFinite(beFee)) findings.push(`In price terms (avg win ${(wMove + feePct).toFixed(2)}% / avg loss ${(lMove - feePct).toFixed(2)}%, minus ~${feePct}% round-trip fees) break-even needs a ${(beFee * 100).toFixed(0)}% win rate. Actual ${(winRate * 100).toFixed(0)}% (95% range ${(ci[0] * 100).toFixed(0)}-${(ci[1] * 100).toFixed(0)}%)${ci[1] < beFee ? ': clearly below break-even.' : ci[0] > beFee ? ': above break-even.' : ': break-even is inside that range, too few trades to call it.'}`);
@@ -104,6 +128,9 @@ export function summarize(rows, opts = {}) {
     findings.push(`Breakeven arms at ${beRoi}% ROI = price move of ${lv}; the median planned TP is only ${medTp.toFixed(2)}%. Where the arming distance is at or beyond the TP, breakeven can never protect a trade before the TP/stop decides it.`);
     if (slHits.length >= 3) findings.push(`Of ${slHits.length} stop-outs: ${armed} reached their breakeven arming level and still lost (the stop should have moved: check /diagnose), ${notArmed} never reached it.`);
   }
+  if (t.length >= 5 && (longs === 0 || longs === t.length || longs / t.length >= 0.85 || longs / t.length <= 0.15)) findings.push(`Direction is lopsided: ${longs} LONG / ${t.length - longs} SHORT.`);
+  if (ctx && ctx.n >= 5 && ctx.chasing / ctx.n >= 0.5) findings.push(`Entries chase the move: ${ctx.chasing} of ${ctx.n} were at the extreme 15% of the previous 2 hours' range (a long at the top / a short at the bottom); the price had already moved ${ctx.medianRunPct.toFixed(1)}% in the trade's direction (median).`);
+  else if (ctx && ctx.n >= 5) findings.push(`Entries are not chasing: only ${ctx.chasing} of ${ctx.n} were in the extreme 15% of the previous 2 hours' range.`);
   if (medSl > 0 && medSl < 0.5) findings.push(`Stops are tight: median planned stop is ${medSl.toFixed(2)}% of price, inside normal 1m-5m noise.`);
   if (losses.length && quickLosses / losses.length >= 0.5) findings.push(`${quickLosses} of ${losses.length} losses closed within 5 minutes: entries are being stopped by noise right after opening.`);
   if (lossHold && winHold && winHold < lossHold * 0.5) findings.push(`Winners are held ${winHold.toFixed(0)} min vs losers ${lossHold.toFixed(0)} min: profits are taken fast, losses are allowed to run.`);
@@ -116,6 +143,7 @@ export function summarize(rows, opts = {}) {
     avgWinMovePct: avgWinMove, avgLossMovePct: avgLossMove, avgHoldWinMin: winHold, avgHoldLossMin: lossHold,
     breakEvenWinRatePriceFee: beFee, winRateCI: ci, avgNotionalWin: notW, avgNotionalLoss: notL, leverages,
     stopOuts: { n: slHits.length, reachedHalfTarget: reachedHalf, neverWorked, medianBestMovePct: medMfeSl, armedButLost: armed, neverArmed: notArmed, bestMoveBuckets },
+    longs, shorts: t.length - longs, entryContext: ctx,
     reasons, findings,
   };
 }
@@ -140,6 +168,19 @@ export async function autopsy({ days = 7, excursions = true } = {}) {
         const ex = excursion(candles, { side: r.side, entry: Number(r.entry_price) });
         if (ex) { r.mfePct = ex.mfePct; r.maePct = ex.maePct; done += 1; }
       } catch (e) { note = `candles unavailable for some trades: ${e.message}`; }
+    }
+  }
+  if (excursions) {
+    let n = 0;
+    for (const r of rows) {
+      if (n >= 25) break;
+      try {
+        const end = new Date(r.opened_at).getTime();
+        const raw = await bitunix.getKline({ symbol: r.symbol, interval: '5m', startTime: end - 2 * 3600_000, endTime: end, limit: 24 });
+        const candles = (raw || []).map((k) => ({ open: Number(k.open), high: Number(k.high), low: Number(k.low) })).filter((c) => c.high > 0 && c.low > 0 && c.open > 0);
+        const cx = entryContext(candles, { side: r.side, entry: Number(r.entry_price) });
+        if (cx) { r.chase = cx.chase; r.runPct = cx.runPct; n += 1; }
+      } catch (e) { note = note || `candles unavailable for some trades: ${e.message}`; }
     }
   }
   return { days: d, note, breakevenRoi: Number(settings().breakeven_threshold), ...summarize(rows, { breakevenRoi: Number(settings().breakeven_threshold) }) };
