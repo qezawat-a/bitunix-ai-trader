@@ -3,6 +3,7 @@ import feed from '../exchange/ws.js';
 import { config } from '../config.js';
 import { createLogger } from '../logger.js';
 import { recordGuard, forgetGuard } from './trace.js';
+import { inferCloseReason } from './close-reason.js';
 import { trailingStop, breakevenStop, computeDynamicTpSl, stopAtrFor } from './risk.js';
 import {
   trailingStep, resetTrailing, trailingSnapshot, evaluateAccountTpSl, closeEverything,
@@ -170,7 +171,8 @@ export async function manageOpenPositions({ notify = null } = {}) {
       await closeTrade({
         positionId: t.position_id,
         exitPrice: h?.closePrice ? Number(h.closePrice) : null,
-        realizedPnl: pnl, roiPct: roi, reason: 'exchange_close',
+        realizedPnl: pnl, roiPct: roi,
+        reason: inferCloseReason({ side: t.side, entry: t.entry_price, exit: h?.closePrice, sl: t.sl_price, tp: t.tp_price }),
       });
       for (const st of (t.strategies || [])) await bumpStrategy(st, pnl > 0, pnl);
       await remember({

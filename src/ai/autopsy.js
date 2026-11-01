@@ -1,4 +1,5 @@
 import { q } from '../db/index.js';
+import { inferCloseReason } from '../trading/close-reason.js';
 
 /**
  * "Why is it losing?" from the bot's own closed trades (trades table), not from
@@ -13,8 +14,11 @@ export function summarize(rows) {
   const t = rows.map((r) => {
     const entry = num(r.entry_price), exit = num(r.exit_price), sl = num(r.sl_price), tp = num(r.tp_price);
     const dir = r.side === 'LONG' ? 1 : -1;
+    const stored = r.close_reason || 'exchange_close';
     return {
-      symbol: r.symbol, side: r.side, leverage: num(r.leverage), reason: r.close_reason || 'unknown',
+      symbol: r.symbol, side: r.side, leverage: num(r.leverage),
+      reason: stored === 'exchange_close' ? inferCloseReason({ side: r.side, entry, exit, sl, tp }) : stored,
+      notional: num(r.qty) * entry,
       pnl: num(r.realized_pnl),
       movePct: entry && exit ? ((exit - entry) / entry) * 100 * dir : NaN,
       slPct: entry && sl ? (Math.abs(entry - sl) / entry) * 100 : NaN,
@@ -43,9 +47,27 @@ export function summarize(rows) {
   const winHold = avg(fin(wins.map((x) => x.holdMin))), lossHold = avg(fin(losses.map((x) => x.holdMin)));
   const quickLosses = losses.filter((x) => Number.isFinite(x.holdMin) && x.holdMin <= 5).length;
 
+  // 95% Wilson interval for the win rate: with few trades it is wide, and that is the point.
+  const z = 1.96, n = t.length || 1, p = winRate;
+  const den = 1 + (z * z) / n;
+  const ctr = (p + (z * z) / (2 * n)) / den;
+  const half = (z * Math.sqrt((p * (1 - p)) / n + (z * z) / (4 * n * n))) / den;
+  const ci = [Math.max(0, ctr - half), Math.min(1, ctr + half)];
+  // Break-even win rate in PRICE terms with the round-trip fee (taker, both legs).
+  // ~0.12% is what the position history shows (fee / notional), passed in so it can be changed.
+  const feePct = 0.12;
+  const wMove = Math.max(0, avg(fin(wins.map((x) => x.movePct)))) - feePct;
+  const lMove = Math.abs(avg(fin(losses.map((x) => x.movePct)))) + feePct;
+  const beFee = wMove + lMove > 0 && wMove > 0 ? lMove / (wMove + lMove) : NaN;
+  const notW = avg(fin(wins.map((x) => x.notional))), notL = avg(fin(losses.map((x) => x.notional)));
+  const byLev = {};
+  for (const x of t) { const k = Number.isFinite(x.leverage) ? `${x.leverage}x` : '?'; const b = (byLev[k] ||= { n: 0, wins: 0, pnl: 0 }); b.n += 1; b.wins += x.pnl > 0 ? 1 : 0; b.pnl += x.pnl; }
+  const leverages = Object.entries(byLev).map(([lev, b]) => ({ lev, ...b })).sort((a, b) => a.pnl - b.pnl);
+
   const findings = [];
   if (t.length < 20) findings.push(`Only ${t.length} closed trades: treat every conclusion below as a lead, not proof.`);
-  if (winRate < breakEvenWinRate - 0.1) findings.push(`Payoff problem: avg win ${avgWin.toFixed(4)} vs avg loss ${avgLoss.toFixed(4)} needs a ${(breakEvenWinRate * 100).toFixed(0)}% win rate to break even; actual is ${(winRate * 100).toFixed(0)}%.`);
+  if (Number.isFinite(beFee)) findings.push(`In price terms (avg win ${(wMove + feePct).toFixed(2)}% / avg loss ${(lMove - feePct).toFixed(2)}%, minus ~${feePct}% round-trip fees) break-even needs a ${(beFee * 100).toFixed(0)}% win rate. Actual ${(winRate * 100).toFixed(0)}% (95% range ${(ci[0] * 100).toFixed(0)}-${(ci[1] * 100).toFixed(0)}%)${ci[1] < beFee ? ': clearly below break-even.' : ci[0] > beFee ? ': above break-even.' : ': break-even is inside that range, too few trades to call it.'}`);
+  if (notW > 0 && notL > 0 && notL > notW * 1.5) findings.push(`Losing trades were bigger: avg notional ${notL.toFixed(2)} USDT on losers vs ${notW.toFixed(2)} on winners, which is why USDT losses outweigh USDT wins even though price moves favour the wins.`);
   if (medTp > 0 && avgWinMove > 0 && avgWinMove < medTp * 0.6) findings.push(`Winners are cut early: they capture ${avgWinMove.toFixed(2)}% of price on average vs a planned TP distance of ${medTp.toFixed(2)}% (${(avgWinMove / medTp * 100).toFixed(0)}%). Look at the close_reason rows below for what closes them.`);
   if (medSl > 0 && medSl < 0.5) findings.push(`Stops are tight: median planned stop is ${medSl.toFixed(2)}% of price, inside normal 1m-5m noise.`);
   if (losses.length && quickLosses / losses.length >= 0.5) findings.push(`${quickLosses} of ${losses.length} losses closed within 5 minutes: entries are being stopped by noise right after opening.`);
@@ -57,6 +79,7 @@ export function summarize(rows) {
     trades: t.length, wins: wins.length, losses: losses.length, pnl: t.reduce((a, x) => a + x.pnl, 0),
     winRate, avgWin, avgLoss, breakEvenWinRate, medianPlannedSlPct: medSl, medianPlannedTpPct: medTp,
     avgWinMovePct: avgWinMove, avgLossMovePct: avgLossMove, avgHoldWinMin: winHold, avgHoldLossMin: lossHold,
+    breakEvenWinRatePriceFee: beFee, winRateCI: ci, avgNotionalWin: notW, avgNotionalLoss: notL, leverages,
     reasons, findings,
   };
 }
@@ -64,7 +87,7 @@ export function summarize(rows) {
 export async function autopsy({ days = 7 } = {}) {
   const d = Math.max(1, Math.min(90, Number(days) || 7));
   const { rows } = await q(
-    `SELECT symbol, side, leverage, entry_price, exit_price, sl_price, tp_price, realized_pnl, close_reason, opened_at, closed_at
+    `SELECT symbol, side, leverage, qty, entry_price, exit_price, sl_price, tp_price, realized_pnl, close_reason, opened_at, closed_at
      FROM trades WHERE status='CLOSED' AND closed_at > now() - ($1||' days')::interval ORDER BY closed_at DESC LIMIT 500`, [String(d)]);
   return { days: d, ...summarize(rows) };
 }

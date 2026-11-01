@@ -91,7 +91,9 @@ export function createCommandHandler(ctx) {
         md(`win rate ${(r.winRate * 100).toFixed(0)}% · needs ${(r.breakEvenWinRate * 100).toFixed(0)}% to break even`),
         md(`avg win ${r.avgWin.toFixed(4)} · avg loss ${r.avgLoss.toFixed(4)} · move win ${r.avgWinMovePct.toFixed(2)}% / loss ${r.avgLossMovePct.toFixed(2)}%`),
         md(`planned stop ${r.medianPlannedSlPct.toFixed(2)}% · planned TP ${r.medianPlannedTpPct.toFixed(2)}% (median)`),
-        '', bold('By close reason')];
+        md(`95% range for win rate ${(r.winRateCI[0] * 100).toFixed(0)}-${(r.winRateCI[1] * 100).toFixed(0)}% · price-terms break-even incl. fees ${Number.isFinite(r.breakEvenWinRatePriceFee) ? (r.breakEvenWinRatePriceFee * 100).toFixed(0) + '%' : '?'}`),
+        md(`avg notional win ${r.avgNotionalWin.toFixed(2)} / loss ${r.avgNotionalLoss.toFixed(2)} USDT`),
+        '', bold('By leverage')].concat(r.leverages.slice(0, 6).map((x) => md(`• ${x.lev}: ${x.n} trades, ${x.wins} wins, PnL ${x.pnl.toFixed(4)}`)), ['', bold('By close reason')]);
       for (const x of r.reasons.slice(0, 8)) lines.push(md(`• ${x.reason}: ${x.n} trades, ${x.wins} wins, PnL ${x.pnl.toFixed(4)}, avg move ${x.avgMovePct.toFixed(2)}%`));
       lines.push('', bold('Findings'), ...r.findings.map((f) => md('• ' + f)));
       return reply(chatId, lines.join('\n'));
