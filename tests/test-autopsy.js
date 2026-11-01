@@ -1,4 +1,4 @@
-import { summarize } from '../src/ai/autopsy.js';
+import { summarize, excursion } from '../src/ai/autopsy.js';
 let passed = 0, failed = 0;
 const ok = (c, m) => { c ? (passed++, console.log(`  ok  ${m}`)) : (failed++, console.log(`  FAIL ${m}`)); };
 const T = (o) => ({ symbol: 'X', side: 'LONG', leverage: 10, entry_price: 100, exit_price: 100, sl_price: 99.7, tp_price: 100.9, realized_pnl: 0, close_reason: 'sl', opened_at: '2026-11-01T00:00:00Z', closed_at: '2026-11-01T00:03:00Z', ...o });
@@ -29,4 +29,16 @@ ok(inf({ side: 'LONG', entry: 100, exit: 99.9, sl: 99.57, tp: 100.65 }) === 'inf
 ok(inf({ side: 'LONG', entry: 100, exit: null, sl: 99, tp: 101 }) === 'exchange_close', 'no exit price -> unknown');
 const big = summarize([T({ exit_price: 99.7, realized_pnl: -0.1, qty: 30 }), T({ exit_price: 100.9, realized_pnl: 0.02, qty: 5 })]);
 ok(big.findings.some((f) => /Losing trades were bigger/.test(f)), 'size-asymmetry finding when losers carry more notional');
+const ex = excursion([{ high: 100.5, low: 99.8 }, { high: 100.2, low: 99.6 }], { side: 'LONG', entry: 100 });
+ok(Math.abs(ex.mfePct - 0.5) < 1e-9 && Math.abs(ex.maePct - 0.4) < 1e-9, 'LONG excursion: best +0.5%, worst -0.4%');
+const exs = excursion([{ high: 100.5, low: 99.8 }], { side: 'SHORT', entry: 100 });
+ok(Math.abs(exs.mfePct - 0.2) < 1e-9 && Math.abs(exs.maePct - 0.5) < 1e-9, 'SHORT excursion is mirrored');
+ok(excursion([], { side: 'LONG', entry: 100 }) === null, 'no candles -> null');
+const so = summarize([
+  T({ exit_price: 99.57, realized_pnl: -0.05, close_reason: 'exchange_close', mfePct: 0.5 }),
+  T({ exit_price: 99.57, realized_pnl: -0.05, close_reason: 'exchange_close', mfePct: 0.02 }),
+  T({ exit_price: 99.57, realized_pnl: -0.05, close_reason: 'exchange_close', mfePct: 0.03 }),
+]);
+ok(so.stopOuts.n === 3 && so.stopOuts.reachedHalfTarget === 1 && so.stopOuts.neverWorked === 2, 'stop-outs split: went toward TP first vs never worked');
+ok(so.findings.some((f) => /Of 3 stop-outs/.test(f)), 'stop-out split finding');
 console.log(`\n${passed} passed, ${failed} failed`); process.exit(failed ? 1 : 0);
