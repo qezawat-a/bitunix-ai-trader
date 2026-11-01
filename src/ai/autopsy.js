@@ -21,9 +21,14 @@ export function excursion(candles, { side, entry }) {
   if (!e || !candles?.length) return null;
   const hi = Math.max(...candles.map((c) => c.high)), lo = Math.min(...candles.map((c) => c.low));
   if (!Number.isFinite(hi) || !Number.isFinite(lo)) return null;
-  return side === 'LONG'
-    ? { mfePct: ((hi - e) / e) * 100, maePct: ((e - lo) / e) * 100 }
-    : { mfePct: ((e - lo) / e) * 100, maePct: ((hi - e) / e) * 100 };
+  const mk = (h, l) => (side === 'LONG'
+    ? { mfe: ((h - e) / e) * 100, mae: ((e - l) / e) * 100 }
+    : { mfe: ((e - l) / e) * 100, mae: ((h - e) / e) * 100 });
+  const all = mk(hi, lo);
+  // Lower bound: drop the entry-minute candle, which also holds pre-fill prices.
+  const rest = candles.slice(1);
+  const lower = rest.length ? mk(Math.max(...rest.map((c) => c.high)), Math.min(...rest.map((c) => c.low))) : null;
+  return { mfePct: all.mfe, maePct: all.mae, mfeAfterEntryPct: lower ? lower.mfe : null };
 }
 
 /**
@@ -50,7 +55,7 @@ export function summarize(rows, opts = {}) {
       symbol: r.symbol, side: r.side, leverage: num(r.leverage),
       reason: stored === 'exchange_close' ? inferCloseReason({ side: r.side, entry, exit, sl, tp }) : stored,
       notional: num(r.qty) * entry,
-      mfe: num(r.mfePct), mae: num(r.maePct), chase: num(r.chase), runPct: num(r.runPct),
+      mfe: num(r.mfePct), mae: num(r.maePct), mfeLo: num(r.mfeAfterEntryPct), chase: num(r.chase), runPct: num(r.runPct),
       pnl: num(r.realized_pnl),
       movePct: entry && exit ? ((exit - entry) / entry) * 100 * dir : NaN,
       slPct: entry && sl ? (Math.abs(entry - sl) / entry) * 100 : NaN,
@@ -117,6 +122,9 @@ export function summarize(rows, opts = {}) {
     medianRunPct: median(withCtx.map((x) => x.runPct)),
   } : null;
 
+  const beyondTpHi = slHits.filter((x) => Number.isFinite(x.tpPct) && x.mfe >= x.tpPct).length;
+  const beyondTpLo = slHits.filter((x) => Number.isFinite(x.tpPct) && Number.isFinite(x.mfeLo) && x.mfeLo >= x.tpPct).length;
+
   const findings = [];
   if (t.length < 20) findings.push(`Only ${t.length} closed trades: treat every conclusion below as a lead, not proof.`);
   if (Number.isFinite(beFee)) findings.push(`In price terms (avg win ${(wMove + feePct).toFixed(2)}% / avg loss ${(lMove - feePct).toFixed(2)}%, minus ~${feePct}% round-trip fees) break-even needs a ${(beFee * 100).toFixed(0)}% win rate. Actual ${(winRate * 100).toFixed(0)}% (95% range ${(ci[0] * 100).toFixed(0)}-${(ci[1] * 100).toFixed(0)}%)${ci[1] < beFee ? ': clearly below break-even.' : ci[0] > beFee ? ': above break-even.' : ': break-even is inside that range, too few trades to call it.'}`);
@@ -131,6 +139,7 @@ export function summarize(rows, opts = {}) {
   if (t.length >= 5 && (longs === 0 || longs === t.length || longs / t.length >= 0.85 || longs / t.length <= 0.15)) findings.push(`Direction is lopsided: ${longs} LONG / ${t.length - longs} SHORT.`);
   if (ctx && ctx.n >= 5 && ctx.chasing / ctx.n >= 0.5) findings.push(`Entries chase the move: ${ctx.chasing} of ${ctx.n} were at the extreme 15% of the previous 2 hours' range (a long at the top / a short at the bottom); the price had already moved ${ctx.medianRunPct.toFixed(1)}% in the trade's direction (median).`);
   else if (ctx && ctx.n >= 5) findings.push(`Entries are not chasing: only ${ctx.chasing} of ${ctx.n} were in the extreme 15% of the previous 2 hours' range.`);
+  if (slHits.length >= 3 && beyondTpHi > 0) findings.push(`${beyondTpHi} of ${slHits.length} stop-outs went PAST their planned TP distance before the stop hit (${beyondTpLo} even when the entry-minute candle is excluded). A TP at that price should have closed them: check the tp_lost_after_stop_move events and that a TP row exists on the exchange.`);
   if (medSl > 0 && medSl < 0.5) findings.push(`Stops are tight: median planned stop is ${medSl.toFixed(2)}% of price, inside normal 1m-5m noise.`);
   if (losses.length && quickLosses / losses.length >= 0.5) findings.push(`${quickLosses} of ${losses.length} losses closed within 5 minutes: entries are being stopped by noise right after opening.`);
   if (lossHold && winHold && winHold < lossHold * 0.5) findings.push(`Winners are held ${winHold.toFixed(0)} min vs losers ${lossHold.toFixed(0)} min: profits are taken fast, losses are allowed to run.`);
@@ -142,7 +151,7 @@ export function summarize(rows, opts = {}) {
     winRate, avgWin, avgLoss, breakEvenWinRate, medianPlannedSlPct: medSl, medianPlannedTpPct: medTp,
     avgWinMovePct: avgWinMove, avgLossMovePct: avgLossMove, avgHoldWinMin: winHold, avgHoldLossMin: lossHold,
     breakEvenWinRatePriceFee: beFee, winRateCI: ci, avgNotionalWin: notW, avgNotionalLoss: notL, leverages,
-    stopOuts: { n: slHits.length, reachedHalfTarget: reachedHalf, neverWorked, medianBestMovePct: medMfeSl, armedButLost: armed, neverArmed: notArmed, bestMoveBuckets },
+    stopOuts: { n: slHits.length, reachedHalfTarget: reachedHalf, neverWorked, medianBestMovePct: medMfeSl, beyondTpHi, beyondTpLo, armedButLost: armed, neverArmed: notArmed, bestMoveBuckets },
     longs, shorts: t.length - longs, entryContext: ctx,
     reasons, findings,
   };
@@ -163,10 +172,12 @@ export async function autopsy({ days = 7, excursions = true } = {}) {
         && r.close_reason !== 'inferred_sl_hit') continue;
       try {
         const start = Math.floor(new Date(r.opened_at).getTime() / 60000) * 60000;
-        const raw = await bitunix.getKline({ symbol: r.symbol, interval: '1m', startTime: start, endTime: new Date(r.closed_at).getTime(), limit: 200 });
+        // MARK_PRICE candles: the bot's TP and SL both trigger on the mark price (tpStopType/slStopType),
+        // so a last-price wick that never moved the mark price must not count as "touched the target".
+        const raw = await bitunix.getKline({ symbol: r.symbol, interval: '1m', startTime: start, endTime: new Date(r.closed_at).getTime(), limit: 200, type: 'MARK_PRICE' });
         const candles = (raw || []).map((k) => ({ high: Number(k.high), low: Number(k.low) })).filter((c) => c.high > 0 && c.low > 0);
         const ex = excursion(candles, { side: r.side, entry: Number(r.entry_price) });
-        if (ex) { r.mfePct = ex.mfePct; r.maePct = ex.maePct; done += 1; }
+        if (ex) { r.mfePct = ex.mfePct; r.maePct = ex.maePct; r.mfeAfterEntryPct = ex.mfeAfterEntryPct; done += 1; }
       } catch (e) { note = `candles unavailable for some trades: ${e.message}`; }
     }
   }

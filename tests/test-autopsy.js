@@ -31,6 +31,7 @@ const big = summarize([T({ exit_price: 99.7, realized_pnl: -0.1, qty: 30 }), T({
 ok(big.findings.some((f) => /Losing trades were bigger/.test(f)), 'size-asymmetry finding when losers carry more notional');
 const ex = excursion([{ high: 100.5, low: 99.8 }, { high: 100.2, low: 99.6 }], { side: 'LONG', entry: 100 });
 ok(Math.abs(ex.mfePct - 0.5) < 1e-9 && Math.abs(ex.maePct - 0.4) < 1e-9, 'LONG excursion: best +0.5%, worst -0.4%');
+ok(Math.abs(ex.mfeAfterEntryPct - 0.2) < 1e-9, 'lower bound excludes the entry-minute candle');
 const exs = excursion([{ high: 100.5, low: 99.8 }], { side: 'SHORT', entry: 100 });
 ok(Math.abs(exs.mfePct - 0.2) < 1e-9 && Math.abs(exs.maePct - 0.5) < 1e-9, 'SHORT excursion is mirrored');
 ok(excursion([], { side: 'LONG', entry: 100 }) === null, 'no candles -> null');
@@ -59,4 +60,11 @@ ok(botShort.chase > 0.9, 'short sold at the bottom is chasing');
 ok(entryContext([], { side: 'LONG', entry: 1 }) === null, 'no candles -> null');
 const ch = summarize(Array.from({ length: 6 }, () => T({ exit_price: 99.7, realized_pnl: -0.05, chase: 0.95, runPct: 2 })));
 ok(ch.findings.some((f) => /Entries chase the move/.test(f)) && ch.findings.some((f) => /Direction is lopsided/.test(f)), 'chasing and lopsided direction are reported');
+const tpb = summarize([
+  T({ exit_price: 99.57, realized_pnl: -0.05, close_reason: 'exchange_close', mfePct: 1.2, mfeAfterEntryPct: 0.95 }),
+  T({ exit_price: 99.57, realized_pnl: -0.05, close_reason: 'exchange_close', mfePct: 1.0, mfeAfterEntryPct: 0.3 }),
+  T({ exit_price: 99.57, realized_pnl: -0.05, close_reason: 'exchange_close', mfePct: 0.2, mfeAfterEntryPct: 0.1 }),
+]);
+ok(tpb.stopOuts.beyondTpHi === 2 && tpb.stopOuts.beyondTpLo === 1, 'stop-outs past the planned TP counted with upper and lower bound');
+ok(tpb.findings.some((f) => /went PAST their planned TP/.test(f)), 'past-TP finding');
 console.log(`\n${passed} passed, ${failed} failed`); process.exit(failed ? 1 : 0);

@@ -662,10 +662,28 @@ export async function upsertPositionTpSl({ symbol, positionId, tpPrice, slPrice,
   // bot believed the stop was locked at breakeven, the ratchet then refused to
   // loosen it, and every later guard pass saw "nothing to improve" and returned
   // an empty action list while the position kept its original wide stop.
+  // Does ANY row still carry a take-profit? A stop move that silently drops the
+  // TP would explain trades that run past their target and then get stopped
+  // (autopsy: median best move before the stop > planned TP). Detection only: it
+  // logs and records an event, it never re-places anything by itself.
+  let tpBefore = null;
+  const checkTpKept = async () => {
+    if (tpBefore == null) return;
+    try {
+      const after = await bitunix.getPendingTpSlOrders({ symbol, positionId });
+      const list = (Array.isArray(after) ? after : (after?.orderList || []))
+        .filter((r) => r && String(r.positionId) === String(positionId));
+      if (list.length && !list.some((r) => r.tpPrice != null)) {
+        log.error(`${symbol} ${positionId}: the stop moved but the take-profit ${tpBefore} is GONE from the exchange`);
+        await logEvent('tp_lost_after_stop_move', { symbol, positionId, side, tpBefore, mode: 'stop-move' }, symbol);
+      }
+    } catch { /* detection is best-effort */ }
+  };
+
   const finish = async (mode, res) => {
     if (wanted == null) return noted(mode, res);   // TP-only edit: nothing to verify
     const v = await verifyStopApplied({ symbol, positionId, side, want: wanted });
-    if (v.ok) return noted(mode, res);
+    if (v.ok) { await checkTpKept(); return noted(mode, res); }
 
     const seen = v.current?.slPrice ?? null;
     log.error(
@@ -689,6 +707,7 @@ export async function upsertPositionTpSl({ symbol, positionId, tpPrice, slPrice,
     const rows = (Array.isArray(existing) ? existing : (existing?.orderList || []))
       .filter((r) => r && String(r.positionId) === String(positionId));
 
+    tpBefore = rows.map((r) => r.tpPrice).find((v) => v != null) ?? null;
     if (!rows.length) {
       return await finish('placed', await bitunix.placePositionTpSl(body));
     }
