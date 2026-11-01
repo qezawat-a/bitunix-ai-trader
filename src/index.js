@@ -1,3 +1,4 @@
+import { reconcileAfterBoot } from './ai/repair.js';
 import { config, assertBootConfig } from './config.js';
 import { createLogger } from './logger.js';
 import { connect as connectDb, migrate, seedSettings, loadSettings, settings, close as closeDb, logEvent } from './db/index.js';
@@ -97,6 +98,15 @@ async function main() {
       ].join('\n'));
     }
   }
+
+  // An approved repair that crashed the new code on boot was rolled back by
+  // scripts/run-guarded.js; tell the operator instead of leaving it silent.
+  try {
+    const rb = await reconcileAfterBoot();
+    if (rb) for (const id of chatIds) {
+      await bot.sendMessage(id, mdt`⏪ Repair #${rb.id} was rolled back automatically: the new code failed to start (${rb.reason}). The previous files are running again.`);
+    }
+  } catch (e) { log.warn(`repair reconcile: ${e.message}`); }
 
   orchestrator.start();
   await logEvent('agent_started', { pairs: pairs.length, settings: s });

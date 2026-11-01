@@ -13,6 +13,9 @@ import { livePositions, portfolioSnapshot, manageOpenPositions } from '../tradin
 import { knownStop, readPositionTpSl } from '../trading/executor.js';
 import * as db from '../db/index.js';
 import * as I from '../strategies/indicators.js';
+import { diagnose } from './diagnose.js';
+import { autopsy } from './autopsy.js';
+import { readSource, propose, listProposals } from './repair.js';
 
 const log = createLogger('tools');
 
@@ -154,7 +157,10 @@ export const TOOLS = [
         confidence: confidence ?? s.min_confidence, agreement: agreement ?? s.min_agreement,
         atrPct: (a.atr / a.price) * 100, regime: a.regime,
       };
-      return { ...computeDynamicTpSl(sig), price: a.price, atr: a.atr, regime: a.regime };
+      return {
+        ...computeDynamicTpSl(sig), price: a.price, atr: a.atr, regime: a.regime,
+        leverageNote: 'maxSafeLeverage is informational. The executor does NOT lower the configured leverage to fit the ATR stop; it pulls the stop inside liquidation instead. Never lower leverage yourself to make a trade open.',
+      };
     },
   },
   {
@@ -419,7 +425,7 @@ export const TOOLS = [
   },
   {
     name: 'set_leverage',
-    description: 'LIVE: change leverage for a symbol on the exchange (and in settings if global=true).',
+    description: 'LIVE: change leverage for a symbol on the exchange (and in settings if global=true). Only when the user explicitly asks for a different leverage - NEVER to make a signal pass or a stop fit; leverage is the user\'s decision.',
     danger: true,
     riskChange: true,
     parameters: {
@@ -493,6 +499,49 @@ export const TOOLS = [
     description: 'Recent signals the scanner produced, including the ones that were rejected and why.',
     parameters: { type: 'object', properties: { limit: num } },
     handler: ({ limit = 10 }) => db.recentSignals(limit),
+  },
+  // ------------------------------------------------------ diagnose & repair
+  {
+    name: 'diagnose_issue',
+    description: 'Find out WHY something did not happen (e.g. trailing/breakeven did not move a stop). Returns the position guard\'s own recorded decision per stage, a rule-based verdict with a category (expected_behavior | config | exchange | possible_code_bug | unknown), the live trailing settings, recent failure events and warn/error logs. ALWAYS call this before explaining a missing action; report the verdict and cite the evidence. Never guess.',
+    parameters: { type: 'object', properties: { symbol: { type: 'string', description: 'e.g. BTCUSDT. Omit for all open positions.' }, topic: { type: 'string', description: 'trailing (default) | entry | general' } } },
+    handler: ({ symbol, topic }) => diagnose({ symbol, topic }),
+  },
+  {
+    name: 'analyze_trades',
+    description: 'Why is the bot losing? Analyses the closed trades in the DB: win rate vs break-even win rate, avg win/loss, planned stop/TP distance vs what was realised, hold time, and PnL grouped by close_reason, plus rule-based findings. Use this before suggesting any strategy or setting change.',
+    parameters: { type: 'object', properties: { days: num } },
+    handler: ({ days }) => autopsy({ days }),
+  },
+  {
+    name: 'read_source',
+    description: 'Read a repo source file with line numbers (max 250 lines per call) so a suspected bug can be verified in the real code. Read-only. .env, .git, node_modules and the repair machinery are blocked.',
+    parameters: { type: 'object', properties: { path: { type: 'string', description: 'repo-relative, e.g. src/trading/manager.js' }, start: num, end: num }, required: ['path'] },
+    handler: ({ path, start, end }) => readSource(path, start, end),
+  },
+  {
+    name: 'propose_code_fix',
+    description: 'Propose a code fix for a CONFIRMED bug (diagnose_issue category possible_code_bug and verified with read_source). This changes NO file: it validates the edits (each old_str must match exactly once, syntax must still parse), stores them and returns an id plus the diff. Show the user the diagnosis and diff and tell them to reply /approve <id> to apply (tests run first, automatic rollback if they get worse), or /reject <id>. You can never apply a fix yourself, and must never say a fix is applied until the user has approved it.',
+    parameters: {
+      type: 'object',
+      properties: {
+        title: { type: 'string' },
+        diagnosis: { type: 'string', description: 'root cause, with the evidence that proves it' },
+        edits: { type: 'array', items: { type: 'object', properties: { path: { type: 'string' }, old_str: { type: 'string' }, new_str: { type: 'string' } }, required: ['path', 'old_str', 'new_str'] } },
+      },
+      required: ['title', 'diagnosis', 'edits'],
+    },
+    riskChange: true,
+    handler: async ({ title, diagnosis, edits }) => {
+      const r = await propose({ title, diagnosis, edits });
+      return { ...r, next: `Ask the user to reply /approve ${r.id} (or /reject ${r.id}). Nothing has been changed yet.` };
+    },
+  },
+  {
+    name: 'list_repairs',
+    description: 'Recent repair proposals and their status (pending / applied / rejected / failed / rolled_back).',
+    parameters: { type: 'object', properties: {} },
+    handler: () => listProposals(10),
   },
   {
     name: 'get_cooldowns',

@@ -13,3 +13,6 @@ mcp.json
 *.rej
 *.patch
 /reports/
+
+# agent self-repair backups
+.repair-backups/
