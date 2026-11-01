@@ -421,6 +421,7 @@ export const HELP = [
   '',
   bold('Diagnose & self-repair (every code change needs your /approve)'),
   md('/diagnose [SYMBOL] — why did the stop/trailing do (or not do) what it did'),
+  md('/tpsl SYMBOL — compare the expected TP ladder with what the exchange holds'),
   md('/autopsy [DAYS] — why is it losing: close reasons, planned vs realised stop/TP, win rate'),
   md('/repairs · /repair ID — proposed code fixes and their diff'),
   md('/approve ID [push] · /reject ID · /rollback ID · /restart'),

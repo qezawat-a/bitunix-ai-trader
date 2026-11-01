@@ -9,6 +9,7 @@ import { mcpStatus, reloadMcpTools, allTools } from '../ai/tools.js';
 import { createLogger } from '../logger.js';
 import { diagnose } from '../ai/diagnose.js';
 import { autopsy } from '../ai/autopsy.js';
+import { auditSymbol } from '../ai/tpsl-audit.js';
 import { getProposal, listProposals, applyProposal, rejectProposal, rollbackProposal, restartProcess } from '../ai/repair.js';
 import { config } from '../config.js';
 import * as db from '../db/index.js';
@@ -101,6 +102,20 @@ export function createCommandHandler(ctx) {
         '', bold('By leverage')].concat(r.leverages.slice(0, 6).map((x) => md(`• ${x.lev}: ${x.n} trades, ${x.wins} wins, PnL ${x.pnl.toFixed(4)}`)), ['', bold('By close reason')]);
       for (const x of r.reasons.slice(0, 8)) lines.push(md(`• ${x.reason}: ${x.n} trades, ${x.wins} wins, PnL ${x.pnl.toFixed(4)}, avg move ${x.avgMovePct.toFixed(2)}%`));
       lines.push('', bold('Findings'), ...r.findings.map((f) => md('• ' + f)));
+      return reply(chatId, lines.join('\n'));
+    },
+
+    async tpsl(chatId, args) {
+      if (!args[0]) return reply(chatId, md('Usage: /tpsl SYMBOL  (an open position)'));
+      const r = await auditSymbol(args[0]);
+      if (!r.open) return reply(chatId, md(`No open ${r.symbol} position.`));
+      const lines = [bold(`🎯 TP/SL audit · ${r.symbol} ${r.side}`),
+        md(`qty ${r.qty} · entry ${r.entry} · stop distance ${r.plannedStopDistPct == null ? '?' : r.plannedStopDistPct.toFixed(2)}% · price tick ${r.priceTick} = ${r.tickPctOfPrice.toFixed(2)}% of price`),
+        md(`method ${r.tpslMethod} · ladder setting "${r.ladderSetting}"`), '', bold('Expected rungs')];
+      for (const x of r.expected) lines.push(md(`• ${x.share}% @ ${x.r}R → ${x.price} (qty ${x.qty.toFixed(0)})`));
+      lines.push('', bold('On the exchange'));
+      for (const x of r.rows) lines.push(md(`• ${x.tpPrice != null ? `TP ${x.tpPrice} qty ${x.tpQty ?? 'whole'}` : ''}${x.slPrice != null ? `SL ${x.slPrice} qty ${x.slQty ?? 'whole'}` : ''}`));
+      lines.push('', bold('Findings'), ...(r.flags.length ? r.flags.map((f) => md('• ' + f)) : [md('• ladder matches the exchange')]));
       return reply(chatId, lines.join('\n'));
     },
 
