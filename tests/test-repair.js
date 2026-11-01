@@ -4,6 +4,7 @@
  */
 import { safePath, simulate, readSource } from '../src/ai/repair.js';
 import { explainTrailing } from '../src/ai/diagnose.js';
+import { recordGuard, pruneGuard, getGuardTrace } from '../src/trading/trace.js';
 
 let passed = 0, failed = 0;
 const assert = (c, m) => { c ? (passed++, console.log(`  ok  ${m}`)) : (failed++, console.log(`  FAIL ${m}`)); };
@@ -65,6 +66,12 @@ v = explainTrailing(mk({
   write: { ok: false, reason: 'exchange did not apply', exchangeSl: 95, wanted: 101 },
 }), S, now);
 assert(v.category === 'exchange' && /write failed/.test(v.headline), 'failed exchange write -> exchange category');
+
+// ---- closed positions must not look like a stalled guard
+recordGuard('open1', 'AAA', 'LONG', 'gate', { roi: 1 });
+recordGuard('gone1', 'BBB', 'LONG', 'gate', { roi: 1 });
+pruneGuard(new Set(['open1']));
+assert(getGuardTrace({ symbol: 'AAA' }).length === 1 && getGuardTrace({ symbol: 'BBB' }).length === 0, 'pruneGuard drops traces of positions that are no longer open');
 
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exit(failed ? 1 : 0);

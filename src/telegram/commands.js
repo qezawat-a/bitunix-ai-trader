@@ -84,9 +84,10 @@ export function createCommandHandler(ctx) {
     },
 
     async autopsy(chatId, args) {
-      const r = await autopsy({ days: Number(args[0]) || 7 });
+      const a0 = String(args[0] || '7');
+      const r = await autopsy({ days: /h$/i.test(a0) ? (parseFloat(a0) / 24) : parseFloat(a0) });
       if (!r.trades) return reply(chatId, md(`No closed trades in the trades table for the last ${r.days} days.`));
-      const lines = [bold(`🔬 Autopsy · last ${r.days}d`),
+      const lines = [bold(`🔬 Autopsy · last ${r.days < 1 ? Math.round(r.days * 24) + 'h' : r.days + 'd'}`),
         md(`${r.trades} trades · ${r.wins}W/${r.losses}L · PnL ${r.pnl.toFixed(4)} (as recorded)`),
         md(`win rate ${(r.winRate * 100).toFixed(0)}% · needs ${(r.breakEvenWinRate * 100).toFixed(0)}% to break even`),
         md(`avg win ${r.avgWin.toFixed(4)} · avg loss ${r.avgLoss.toFixed(4)} · move win ${r.avgWinMovePct.toFixed(2)}% / loss ${r.avgLossMovePct.toFixed(2)}%`),
@@ -94,7 +95,7 @@ export function createCommandHandler(ctx) {
         md(`95% range for win rate ${(r.winRateCI[0] * 100).toFixed(0)}-${(r.winRateCI[1] * 100).toFixed(0)}% · price-terms break-even incl. fees ${Number.isFinite(r.breakEvenWinRatePriceFee) ? (r.breakEvenWinRatePriceFee * 100).toFixed(0) + '%' : '?'}`),
         md(`avg notional win ${r.avgNotionalWin.toFixed(2)} / loss ${r.avgNotionalLoss.toFixed(2)} USDT`),
         ...(r.stopOuts.n ? [md(`stop-outs ${r.stopOuts.n}: ${r.stopOuts.reachedHalfTarget} went half-way to TP first · ${r.stopOuts.neverWorked} never worked · best move before stop (median) ${r.stopOuts.medianBestMovePct.toFixed(2)}%`)] : []),
-        ...(r.stopOuts.n ? [md(`breakeven (${r.breakevenRoi}% ROI): ${r.stopOuts.armedButLost} stop-outs reached it and still lost · ${r.stopOuts.neverArmed} never reached it`), md(`stop-outs that went at least ${r.stopOuts.bestMoveBuckets.map((b) => `${b.atLeastPct}% → ${b.stopOuts}`).join(' · ')}`)] : []),
+        ...(r.stopOuts.n ? [md(`breakeven check uses TODAY's setting (${r.breakevenRoi}% ROI), not the one each trade ran with: ${r.stopOuts.armedButLost} stop-outs reached it and still lost · ${r.stopOuts.neverArmed} never reached it`), md(`stop-outs that went at least ${r.stopOuts.bestMoveBuckets.map((b) => `${b.atLeastPct}% → ${b.stopOuts}`).join(' · ')}`)] : []),
         '', bold('By leverage')].concat(r.leverages.slice(0, 6).map((x) => md(`• ${x.lev}: ${x.n} trades, ${x.wins} wins, PnL ${x.pnl.toFixed(4)}`)), ['', bold('By close reason')]);
       for (const x of r.reasons.slice(0, 8)) lines.push(md(`• ${x.reason}: ${x.n} trades, ${x.wins} wins, PnL ${x.pnl.toFixed(4)}, avg move ${x.avgMovePct.toFixed(2)}%`));
       lines.push('', bold('Findings'), ...r.findings.map((f) => md('• ' + f)));

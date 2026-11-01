@@ -16,6 +16,11 @@ export function recordGuard(positionId, symbol, side, stage, data = {}) {
 
 export function forgetGuard(positionId) { traces.delete(String(positionId)); }
 
+/** Drop the trace of every position that is no longer open (their last pass is history, not a stall). */
+export function pruneGuard(liveIds) {
+  for (const id of [...traces.keys()]) if (!liveIds.has(id)) traces.delete(id);
+}
+
 export function getGuardTrace({ positionId = null, symbol = null } = {}) {
   const out = [];
   for (const [id, t] of traces) {

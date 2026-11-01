@@ -2,7 +2,7 @@ import bitunix from '../exchange/bitunix.js';
 import feed from '../exchange/ws.js';
 import { config } from '../config.js';
 import { createLogger } from '../logger.js';
-import { recordGuard, forgetGuard } from './trace.js';
+import { recordGuard, forgetGuard, pruneGuard } from './trace.js';
 import { inferCloseReason } from './close-reason.js';
 import { trailingStop, breakevenStop, computeDynamicTpSl, stopAtrFor } from './risk.js';
 import {
@@ -141,6 +141,7 @@ export async function manageOpenPositions({ notify = null } = {}) {
   }
 
   const liveIds = new Set(positions.map((p) => String(p.positionId)));
+  pruneGuard(liveIds);
   for (const id of Object.keys(trailingSnapshot())) {
     if (!liveIds.has(id)) { resetTrailing(id); forgetGuard(id); }
   }
@@ -425,6 +426,10 @@ export async function manageOpenPositions({ notify = null } = {}) {
             if (notify) {
               await notify(`🔒 *Stop moved* — ${p.symbol} ${p.side}\nROI ${p.roi.toFixed(1)}% → SL ${trail.stop.toPrecision(8)} (${trail.reason})`);
             }
+          } else if (/\b30004\b/.test(String(r.reason || ''))) {
+            // The position closed (TP, stop or manual) between the read and the
+            // write: the exchange has nothing left to move. Not a failed stop move.
+            log.info(`${p.symbol} ${p.side}: position already closed on the exchange while moving the stop (30004)`);
           } else {
             // Do NOT set lastStop here. Leaving it unset is what lets the next
             // pass retry instead of treating the phantom stop as done.

@@ -121,7 +121,7 @@ export function summarize(rows, opts = {}) {
 }
 
 export async function autopsy({ days = 7, excursions = true } = {}) {
-  const d = Math.max(1, Math.min(90, Number(days) || 7));
+  const d = Math.max(0.02, Math.min(90, Number(days) || 7));
   const { rows } = await q(
     `SELECT symbol, side, leverage, qty, entry_price, exit_price, sl_price, tp_price, realized_pnl, close_reason, opened_at, closed_at
      FROM trades WHERE status='CLOSED' AND closed_at > now() - ($1||' days')::interval ORDER BY closed_at DESC LIMIT 500`, [String(d)]);

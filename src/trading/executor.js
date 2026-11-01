@@ -602,17 +602,24 @@ export async function readPositionTpSl({ symbol, positionId, side = null }) {
  * read-back is the only proof. Retried because the pending-orders view can lag
  * the write by a moment.
  */
-async function verifyStopApplied({ symbol, positionId, side, want, tries = 3 }) {
+async function verifyStopApplied({ symbol, positionId, side, want, delays = [400, 700, 1000, 1400, 1800] }) {
+  // The pending-orders view lags a modify by MORE than a second on Bitunix: the
+  // 2026-11-01 POWRUSDT events show the exchange still reporting the old stop on
+  // the first check and the new one on the next pass. A ~1s window judged a
+  // write that did land as "unverified" and then escalated (modify-by-id, cancel &
+  // replace, extra stop) on top of it. Wait up to ~5s before declaring it lost,
+  // and accept one price tick of difference (a real no-op leaves the OLD stop far away).
+  let tick = 0;
+  try {
+    const info = await bitunix.pairInfo(symbol);
+    if (info?.quotePrecision != null) tick = Math.pow(10, -Number(info.quotePrecision));
+  } catch { /* tick tolerance is optional */ }
+  const tol = Math.max(Math.abs(want) * 1e-4, tick * 1.01, 1e-9);
   let current = null;
-  for (let i = 0; i < tries; i++) {
+  for (let i = 0; i <= delays.length; i++) {
     current = await readPositionTpSl({ symbol, positionId, side });
-    if (current) {
-      // quotePrecision can differ from what we sent by a hair; a genuine no-op
-      // leaves the OLD stop far away, so a loose band is safe here.
-      const tol = Math.max(Math.abs(want) * 1e-4, 1e-9);
-      if (Math.abs(current.slPrice - want) <= tol) return { ok: true, current };
-    }
-    if (i < tries - 1) await new Promise((r) => setTimeout(r, 350));
+    if (current && Math.abs(current.slPrice - want) <= tol) return { ok: true, current };
+    if (i < delays.length) await new Promise((r) => setTimeout(r, delays[i]));
   }
   return { ok: false, current };
 }
