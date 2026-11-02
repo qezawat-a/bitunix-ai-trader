@@ -175,7 +175,7 @@ export const config = {
     // Stop/target distances must clear this fraction of price: a bracket
     // inside the taker round-trip fee band can never pay (2026-10-07:
     // 1m-scaled SLs at 0.09% of price on a 0.08-0.10% round trip).
-    min_stop_pct: num(process.env.MIN_STOP_PCT, 0.25),
+    min_stop_pct: num(process.env.MIN_STOP_PCT, 0.5),
     account_tp_usdt: num(process.env.ACCOUNT_TP_USDT, 0),                      // 0 = off
     account_sl_usdt: num(process.env.ACCOUNT_SL_USDT, 0),                      // 0 = off
     // Safety gap kept between the stop and the liquidation price, as a

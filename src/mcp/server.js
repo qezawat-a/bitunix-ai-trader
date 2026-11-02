@@ -33,6 +33,15 @@ function error(id, code, message, data) {
   send({ jsonrpc: '2.0', id, error: data === undefined ? { code, message } : { code, message, data } });
 }
 
+// MCP trading tools stay off unless BITUNIX_ENABLE_TRADING=true (CLAUDE.md safety rule).
+// A tool is "trading" when it carries the `danger` flag (mutates the live account).
+const mcpTradingEnabled = String(process.env.BITUNIX_ENABLE_TRADING || '').toLowerCase() === 'true';
+function isMcpToolAllowed(t) {
+  if (t.danger && !mcpTradingEnabled) return false;
+  return true;
+}
+const MCP_TOOLS = TOOLS.filter(isMcpToolAllowed);
+
 const handlers = {
   initialize: () => ({
     protocolVersion: PROTOCOL_VERSION,
@@ -41,7 +50,7 @@ const handlers = {
   }),
 
   'tools/list': () => ({
-    tools: TOOLS.map((t) => ({
+    tools: MCP_TOOLS.map((t) => ({
       name: t.name,
       description: (t.danger ? '[LIVE ACCOUNT ACTION] ' : '') + t.description,
       inputSchema: t.parameters,
@@ -55,10 +64,18 @@ const handlers = {
     // it must surface as a JSON-RPC error (-32602), not as a successful call
     // whose payload happens to contain an error. Otherwise the client cannot
     // tell "you typed the name wrong" from "the trade was rejected".
-    if (!name || !TOOL_MAP[name]) {
-      const err = new Error(`Unknown tool: ${name}`);
+    if (!name || !MCP_TOOLS.some((t) => t.name === name)) {
+      const err = new Error(`Unknown tool: ${name}` + (!mcpTradingEnabled ? ' (trading tools are disabled: set BITUNIX_ENABLE_TRADING=true)' : ''));
       err.code = -32602;
-      err.data = { available: Object.keys(TOOL_MAP) };
+      err.data = { available: Object.keys(MCP_TOOLS.reduce((a, t) => ({ ...a, [t.name]: true }), {})) };
+      throw err;
+    }
+
+    // Guard: trading tools are never executed over MCP unless explicitly enabled.
+    const requestedTool = TOOLS.find((t) => t.name === name);
+    if (requestedTool?.danger && !mcpTradingEnabled) {
+      const err = new Error(`Trading tool '${name}' is disabled over MCP: set BITUNIX_ENABLE_TRADING=true`);
+      err.code = -32602;
       throw err;
     }
 
