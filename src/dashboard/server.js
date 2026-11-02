@@ -268,7 +268,7 @@ function handleRequest(req, res) {
   res.end('not found');
 }
 
-export function start(opts = {}) {
+export function startDashboard(opts = {}) {
   if (!config.dashboard.enabled || !config.dashboard.port) {
     log.info('dashboard disabled (DASHBOARD_ENABLED/DASHBOARD_PORT)');
     return null;
@@ -293,7 +293,7 @@ export function attachOrchestrator(o) {
   orchestrator = o;
 }
 
-export async function stop() {
+export async function stopDashboard() {
   try { server?.close(); } catch {}
   server = null;
   orchestrator = null;
