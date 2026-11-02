@@ -309,6 +309,8 @@ SIGNAL
 WHAT I REMEMBER ABOUT ${signal.symbol}
 ${memText}
 
+IMPORTANT: Account balance is NOT a trading gate. The ONLY gates are min_agreement, min_confidence, tf_min_confidence, signal_confirm_scans, cooldown_min, max_open_positions — all already passed. Do NOT refuse a trade because of low balance, small account size, or fee concerns. Position sizing is handled mechanically by the executor. Your job is market judgement ONLY: is this a good setup right now? If the setup is sound, take it. If you think it is bad, explain using tools and market context.
+
 You may call read-only tools to check the book, funding history, your own recent performance, or current exposure before deciding. Do not change settings, place orders, close positions, or modify TP/SL during this judgement pass.
 
 
