@@ -625,6 +625,25 @@ async function verifyStopApplied({ symbol, positionId, side, want, delays = [400
 }
 
 export async function upsertPositionTpSl({ symbol, positionId, tpPrice, slPrice, side = null, entry = null }) {
+  // ---- preserve the existing take-profit -------------------------------
+  // A stop move (breakeven/trailing) only carries slPrice. If we don't
+  // explicitly send tpPrice, the exchange reads the missing field as
+  // "remove the take-profit" and drops it — which is exactly what produced
+  // the tp_lost_after_stop_move events in the autopsy (16 of 20 stop-outs
+  // ran past their planned TP). So: when no tpPrice was given, read the
+  // current one off the exchange and carry it through the modify.
+  if (tpPrice == null) {
+    try {
+      const rows = await bitunix.getPendingTpSlOrders({ symbol, positionId });
+      const list = (Array.isArray(rows) ? rows : (rows?.orderList || []))
+        .filter((r) => r && String(r.positionId) === String(positionId));
+      const tpRow = list.find((r) => r.tpPrice != null) || null;
+      if (tpRow) tpPrice = Number(tpRow.tpPrice);
+    } catch (e) {
+      log.warn(`${symbol}: could not read existing TP for preservation (${e.message})`);
+    }
+  }
+
   // ---- ratchet guard --------------------------------------------------
   if (slPrice != null && side) {
     const key = String(positionId);

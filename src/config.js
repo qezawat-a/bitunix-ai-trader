@@ -163,8 +163,8 @@ export const config = {
     reversal_enabled: bool(process.env.REVERSAL_ENABLED, true),
     reversal_confidence: num(process.env.REVERSAL_CONFIDENCE, 85),
 
-    breakeven_threshold: num(process.env.BREAKEVEN_THRESHOLD, 4),              // ROI % - move SL to entry once 4% reached
-    trailing_trigger_roi_pct: num(process.env.TRAILING_TRIGGER_ROI_PCT, 8),    // ROI % - trail SL behind price once 8% reached
+    breakeven_threshold: num(process.env.BREAKEVEN_THRESHOLD, 4),              // ROI % - move SL to entry once reached (lowered from 8: at 10x, 8% ROI = 0.8% price move, beyond the 0.92% median TP, so breakeven never armed before TP hit)
+    trailing_trigger_roi_pct: num(process.env.TRAILING_TRIGGER_ROI_PCT, 6),    // ROI % - trail SL behind price once reached (lowered from 12: at 10x, 12% ROI = 1.2% price move, beyond median TP, so trailing never activated)
     trailing_distance_atr: num(process.env.TRAILING_DISTANCE_ATR, 0.5),
     // --- the four TP/SL methods (help centre id=290) ---
     tp_mode: str(process.env.TP_MODE, 'ADAPTIVE').toUpperCase(),                 // ADAPTIVE | FIXED_R
