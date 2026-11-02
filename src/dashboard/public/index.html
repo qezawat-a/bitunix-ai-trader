@@ -411,6 +411,9 @@ async function saveSetting(key, raw, btn) {
     if (el) el.appendChild(msg);
     if (!res.error) {
       btn.classList.remove('show');
+      // Re-fetch from server so the UI shows the confirmed value immediately,
+      // instead of waiting for the next 4s poll which can overwrite a fresh edit.
+      await refreshSettings();
       setTimeout(() => { if (btn) btn.classList.remove('show'); }, 1200);
     }
   } catch (e) {
