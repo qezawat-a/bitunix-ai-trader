@@ -530,7 +530,7 @@ export function trailingStop({ side, entry, currentPrice, atr, roiPct, leverage,
   const s = settings();
   // ?? not ||: 0 is a legitimate "arm immediately" value for either threshold
   // and must not be silently replaced by the default.
-  const beThreshold = Number(s.breakeven_threshold ?? 8);        // ROI %
+  const beThreshold = Number(s.breakeven_threshold ?? 4);        // ROI %
   const trailTrigger = Number(s.trailing_trigger_roi_pct ?? 12);  // ROI %
   const isLong = side === 'LONG';
 
