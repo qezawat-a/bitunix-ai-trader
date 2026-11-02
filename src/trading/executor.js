@@ -93,6 +93,17 @@ export async function ensureSymbolConfig(symbol) {
     try {
       await bitunix.changeLeverage({ symbol, leverage: target });
       lev = target;
+      // If the exchange clamped leverage below the configured value, update
+      // the global setting so the user sees the real leverage being used.
+      // The user can always raise it again for pairs that support higher.
+      if (target < wantLev) {
+        try {
+          await db.setSetting('leverage', target, 'system');
+          log.info(`${symbol}: leverage clamped ${wantLev}x -> ${target}x, updated global setting`);
+        } catch (e) {
+          log.warn(`${symbol}: could not update leverage setting (${e.message})`);
+        }
+      }
     } catch (e) {
       log.warn(`${symbol} leverage: ${e.message}`);
     }
