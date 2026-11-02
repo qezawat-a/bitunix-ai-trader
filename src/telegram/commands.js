@@ -10,6 +10,9 @@ import { createLogger } from '../logger.js';
 import { diagnose } from '../ai/diagnose.js';
 import { autopsy } from '../ai/autopsy.js';
 import { auditSymbol } from '../ai/tpsl-audit.js';
+import { listPending, takePending, dropPending } from '../ai/pending-changes.js';
+import { applyConfirmed } from '../ai/tools.js';
+import { q } from '../db/index.js';
 import { getProposal, listProposals, applyProposal, rejectProposal, rollbackProposal, restartProcess } from '../ai/repair.js';
 import { config } from '../config.js';
 import * as db from '../db/index.js';
@@ -117,6 +120,40 @@ export function createCommandHandler(ctx) {
       for (const x of r.rows) lines.push(md(`• ${x.tpPrice != null ? `TP ${x.tpPrice} qty ${x.tpQty ?? 'whole'}` : ''}${x.slPrice != null ? `SL ${x.slPrice} qty ${x.slQty ?? 'whole'}` : ''}`));
       lines.push('', bold('Findings'), ...(r.flags.length ? r.flags.map((f) => md('• ' + f)) : [md('• ladder matches the exchange')]));
       return reply(chatId, lines.join('\n'));
+    },
+
+    // Who changed the risk settings, and when. agent_settings records updated_by
+    // ('user' = /set from Telegram, 'agent' = the AI through its tool) and updated_at.
+    async whoset(chatId) {
+      const keys = ['auto_trade', 'margin_pct', 'leverage', 'max_open_positions', 'min_agreement', 'min_confidence',
+        'tf_min_confidence', 'reversal_enabled', 'reversal_confidence', 'breakeven_threshold', 'trailing_trigger_roi_pct',
+        'scan_interval_sec', 'tpsl_method', 'partial_tp_ladder', 'universe_rank', 'min_24h_volume_usd'];
+      const { rows } = await q(`SELECT key, value, updated_by, updated_at FROM agent_settings WHERE key = ANY($1) ORDER BY updated_at DESC`, [keys]);
+      if (!rows.length) return reply(chatId, md('No stored settings found.'));
+      const lines = [bold('🕵️ Who set the risk settings'), ...rows.map((r) =>
+        md(`• ${r.key} = ${JSON.stringify(r.value)} — by ${r.updated_by || '?'} at ${new Date(r.updated_at).toISOString().slice(0, 16).replace('T', ' ')} UTC`))];
+      lines.push('', italic('updated_by "agent" = the AI changed it through its tool; "user" = a /set command.'));
+      return reply(chatId, lines.join('\n'));
+    },
+
+    // The AI can only PROPOSE changes to risk and signal-gate settings; these commands are
+    // the single place such a change is applied (or dropped).
+    async pendingset(chatId) {
+      const rows = listPending();
+      if (!rows.length) return reply(chatId, md('No setting changes are waiting for your confirmation.'));
+      return reply(chatId, [bold('⏳ Waiting for your confirmation'), ...rows.map((p) => md(`#${p.id}  ${p.summary}`)),
+        '', italic('/confirmset ID applies it · /rejectset ID drops it (they expire after 30 min)')].join('\n'));
+    },
+
+    async confirmset(chatId, args) {
+      const p = takePending(args[0]);
+      if (!p) return reply(chatId, md('Nothing pending with that id (it may have expired). /pendingset lists what is waiting.'));
+      const r = await applyConfirmed(p.tool, p.args);
+      return reply(chatId, [bold(`✅ Applied #${p.id}`), md(p.summary), r?.rejected ? md('rejected: ' + JSON.stringify(r.rejected)) : ''].join('\n'));
+    },
+
+    async rejectset(chatId, args) {
+      return reply(chatId, md(dropPending(args[0]) ? `Dropped #${args[0]}. Nothing was changed.` : 'Nothing pending with that id.'));
     },
 
     async repairs(chatId) {

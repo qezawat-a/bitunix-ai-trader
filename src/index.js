@@ -3,7 +3,6 @@ import { config, assertBootConfig } from './config.js';
 import { createLogger } from './logger.js';
 import { connect as connectDb, migrate, seedSettings, loadSettings, settings, close as closeDb, logEvent } from './db/index.js';
 import { startHealthServer, stopHealthServer, setHealth } from './health.js';
-import { startDashboard, stopDashboard, attachOrchestrator } from './dashboard/server.js';
 import bitunix from './exchange/bitunix.js';
 import feed from './exchange/ws.js';
 import ai from './ai/providers.js';
@@ -79,12 +78,6 @@ async function main() {
   const orchestrator = new Orchestrator({ bot, chatIds });
   bot.onMessage(createCommandHandler({ bot, orchestrator }));
 
-  // ---- dashboard -------------------------------------------------------
-  // Starts after the orchestrator exists so /api/status and commands work.
-  // Never fatal: a bad port degrades silently.
-  attachOrchestrator(orchestrator);
-  startDashboard();
-
   const s = settings();
   // No bot, no chat ids, or a degraded bot — there is nobody to tell. Say it in
   // the log instead of crashing on me.username.
@@ -127,7 +120,6 @@ async function main() {
     orchestrator.stop();
     bot.stop();
     feed.stop();
-    stopDashboard();
     stopHealthServer();
     try { await logEvent('agent_stopped', { signal: sig }); } catch {}
     await closeDb();

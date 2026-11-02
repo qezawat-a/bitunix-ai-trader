@@ -15,6 +15,7 @@ import * as db from '../db/index.js';
 import * as I from '../strategies/indicators.js';
 import { diagnose } from './diagnose.js';
 import { autopsy } from './autopsy.js';
+import { needsConfirmation, queueChange } from './pending-changes.js';
 import { readSource, propose, listProposals } from './repair.js';
 
 const log = createLogger('tools');
@@ -396,11 +397,12 @@ export const TOOLS = [
       },
       required: ['changes'],
     },
-    handler: async ({ changes }) => {
+    handler: async ({ changes }, ctx = {}) => {
       // Same validation as /set. The model is confident and occasionally wrong;
       // a bad value here would only surface as a dead loop on the next tick.
       const applied = {};
       const rejected = {};
+      const queued = [];
       for (const [k, v] of Object.entries(changes || {})) {
         if (!(k in db.settings())) {
           rejected[k] = `no such setting. Valid keys: ${Object.keys(db.settings()).join(', ')}`;
@@ -408,7 +410,13 @@ export const TOOLS = [
         }
         try {
           const value = validateSetting(k, v);
-          await db.setSetting(k, value, 'agent');
+          // Risk and signal-gate settings are the user's call: queue them for /confirmset.
+          if (!ctx.confirmed && needsConfirmation(k, value) && JSON.stringify(db.settings()[k]) !== JSON.stringify(value)) {
+            const id = queueChange({ tool: 'update_settings', args: { changes: { [k]: value } }, summary: `${k}: ${JSON.stringify(db.settings()[k])} -> ${JSON.stringify(value)}` });
+            queued.push({ id, key: k, from: db.settings()[k], to: value });
+            continue;
+          }
+          await db.setSetting(k, value, ctx.confirmed ? 'user-confirmed' : 'agent');
           applied[k] = value;
         } catch (e) {
           rejected[k] = e.message;
@@ -416,9 +424,13 @@ export const TOOLS = [
       }
       resetSymbolConfigCache();
       const res = { applied, settings: db.settings() };
+      if (queued.length) {
+        res.pending = queued;
+        res.note = `NOT applied: ${queued.map((x) => x.key).join(', ')} are risk/signal-gate settings. The user must confirm each with /confirmset <id> (ids: ${queued.map((x) => `${x.key}=#${x.id}`).join(', ')}). Say exactly that; never claim the change is in effect.`;
+      }
       if (Object.keys(rejected).length) {
         res.rejected = rejected;
-        res.note = 'Rejected values were NOT applied. Tell the user exactly why and do not claim success.';
+        res.note = (res.note ? res.note + ' ' : '') + 'Rejected values were NOT applied. Tell the user exactly why and do not claim success.';
       }
       return res;
     },
@@ -433,10 +445,14 @@ export const TOOLS = [
       properties: { symbol: str, leverage: num, global: bool },
       required: ['leverage'],
     },
-    handler: async ({ symbol, leverage, global: g }) => {
+    handler: async ({ symbol, leverage, global: g }, ctx = {}) => {
+      if (!ctx.confirmed) {
+        const id = queueChange({ tool: 'set_leverage', args: { symbol, leverage, global: g }, summary: `leverage ${symbol || 'global'} -> ${leverage}x` });
+        return { pending: [{ id, key: 'leverage', to: leverage, symbol: symbol || null }], note: `NOT applied: leverage is the user's decision. The user must confirm with /confirmset ${id}. Say exactly that; never claim it is in effect.` };
+      }
       const res = {};
       if (symbol) res.exchange = await bitunix.changeLeverage({ symbol: symbol.toUpperCase(), leverage });
-      if (g !== false) { await db.setSetting('leverage', Number(leverage), 'agent'); resetSymbolConfigCache(); }
+      if (g !== false) { await db.setSetting('leverage', Number(leverage), 'user-confirmed'); resetSymbolConfigCache(); }
       return res;
     },
   },
@@ -450,10 +466,14 @@ export const TOOLS = [
       properties: { symbol: str, marginMode: { type: 'string', enum: ['CROSS', 'ISOLATION'] }, global: bool },
       required: ['marginMode'],
     },
-    handler: async ({ symbol, marginMode, global: g }) => {
+    handler: async ({ symbol, marginMode, global: g }, ctx = {}) => {
+      if (!ctx.confirmed) {
+        const id = queueChange({ tool: 'set_margin_mode', args: { symbol, marginMode, global: g }, summary: `margin mode ${symbol || 'global'} -> ${marginMode}` });
+        return { pending: [{ id, key: 'margin_mode', to: marginMode, symbol: symbol || null }], note: `NOT applied: margin mode is the user's decision. The user must confirm with /confirmset ${id}.` };
+      }
       const res = {};
       if (symbol) res.exchange = await bitunix.changeMarginMode({ symbol: symbol.toUpperCase(), marginMode });
-      if (g !== false) { await db.setSetting('margin_mode', marginMode, 'agent'); resetSymbolConfigCache(); }
+      if (g !== false) { await db.setSetting('margin_mode', marginMode, 'user-confirmed'); resetSymbolConfigCache(); }
       return res;
     },
   },
@@ -614,6 +634,13 @@ function toolPolicyError(t, { allowRiskChanges = true, allowEntries = true, read
     return `${t.name} is disabled during signal judgement; this pass is read-only`;
   }
   return null;
+}
+
+/** Run a queued change. Only ever called from the Telegram /confirmset handler. */
+export async function applyConfirmed(tool, args) {
+  const t = TOOL_MAP[tool];
+  if (!t) throw new Error(`unknown tool ${tool}`);
+  return t.handler(args || {}, { confirmed: true });
 }
 
 export function toolSchemas(options = {}) {

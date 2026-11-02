@@ -421,6 +421,8 @@ export const HELP = [
   '',
   bold('Diagnose & self-repair (every code change needs your /approve)'),
   md('/diagnose [SYMBOL] — why did the stop/trailing do (or not do) what it did'),
+  md('/pendingset · /confirmset ID · /rejectset ID — risk settings the AI proposed; nothing applies until you confirm'),
+  md('/whoset — who changed margin/confidence/agreement and the other risk settings, and when'),
   md('/tpsl SYMBOL — compare the expected TP ladder with what the exchange holds'),
   md('/autopsy [DAYS] — why is it losing: close reasons, planned vs realised stop/TP, win rate'),
   md('/repairs · /repair ID — proposed code fixes and their diff'),
