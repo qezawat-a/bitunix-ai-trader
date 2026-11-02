@@ -37,20 +37,18 @@ const PUBLIC_DIR = path.join(__dirname, 'public');
 let server = null;
 let orchestrator = null; // injected from src/index.js
 
-/** Redact anything that looks like an API credential. */
-function redact(obj) {
+/** Redact values whose key looks like an API credential. Everything else passes through. */
+function redact(obj, parentKey = '') {
   if (obj === null || obj === undefined) return obj;
-  if (typeof obj === 'string') return obj.length > 4 ? '****' + obj.slice(-4) : '****';
-  if (Array.isArray(obj)) return obj.map(redact);
+  if (typeof obj === 'string') {
+    const cred = /key|secret|token|password/i.test(parentKey);
+    return cred && obj.length > 4 ? '****' + obj.slice(-4) : obj;
+  }
+  if (Array.isArray(obj)) return obj.map((v) => redact(v, parentKey));
   if (typeof obj === 'object') {
     const out = {};
     for (const [k, v] of Object.entries(obj)) {
-      const lk = String(k).toLowerCase();
-      if (lk.includes('key') || lk.includes('secret') || lk.includes('token') || lk.includes('password')) {
-        out[k] = '****';
-      } else {
-        out[k] = redact(v);
-      }
+      out[k] = redact(v, k);
     }
     return out;
   }
