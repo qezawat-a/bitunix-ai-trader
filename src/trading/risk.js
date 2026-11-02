@@ -33,7 +33,11 @@ const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 export function mmrFor(maxLeverage) {
   const maxLev = Number(maxLeverage);
   if (!(maxLev > 0)) return 0.005;
-  return clamp(1 / maxLev, 0.004, 0.05);
+  // Fallback MMR when tierFor fails. The old formula 1/maxLev made
+  // liqPrice == entry at any leverage where 1/lev >= 1 - MMR, which
+  // blocked ALL trades at 50x+ (liqUnsafe). Cap at 0.01 so high leverage
+  // doesn't falsely trigger liqUnsafe while staying conservative.
+  return clamp(Math.min(1 / maxLev, 0.01), 0.004, 0.05);
 }
 
 /**
