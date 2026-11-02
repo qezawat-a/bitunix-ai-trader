@@ -112,6 +112,14 @@ export const config = {
     ),
   },
 
+  // Dashboard (settings & commands web UI). Runs on its own port so it never
+  // competes with the health endpoint, and degrades silently if the port is
+  // taken — it is never allowed to take the trader down.
+  dashboard: {
+    port: num(process.env.DASHBOARD_PORT, 0),
+    enabled: bool(process.env.DASHBOARD_ENABLED, false),
+  },
+
   bitunix: {
     key: str(process.env.BITUNIX_API_KEY, ''),
     secret: str(process.env.BITUNIX_API_SECRET, ''),

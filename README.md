@@ -103,6 +103,27 @@ npm run db:check            # DNS -> TCP -> TLS -> auth -> grants; no other keys
 5. If you set `PORT` (Railway does), the agent serves `GET /health` on it, so the
    platform sees a live worker instead of restarting one that never binds a port.
 
+### Web dashboard (settings & commands UI)
+
+The agent ships a tiny dependency-free HTTP dashboard at
+`src/dashboard/`. It is **off by default** and never blocks the trader — if the
+port is taken it degrades silently.
+
+```bash
+DASHBOARD_ENABLED=true DASHBOARD_PORT=8081 npm start
+```
+
+Open `http://localhost:8081`:
+
+- **Settings** — every live setting inline-editable, with its description and accepted range. Saves validate against `settings-schema.js` and write straight to Neon `agent_settings`, so a `/set` from Telegram shows the same value seconds later.
+- **Positions** — open positions with side, leverage, entry, qty, uPnL, ROI and TP/SL.
+- **Signals** — the last 50 signals with confidence, agreement, regime and whether each was taken or rejected.
+- **Trades** — open trades plus 7d win/loss/PnL.
+- **Events** — recent agent events (AI verdicts, TP/SL moves, reversals, errors).
+- **Status** — DB health, scanner/reports toggles, loop stats, uptime — plus the **Scanner / Reports** toggles and an emergency **Kill auto trading** button (flips `auto_trade` off immediately).
+
+Routes are `GET|POST /api/settings`, `/api/positions`, `/api/trades`, `/api/signals`, `/api/events`, `/api/status`, `/api/command/:name`, `/api/health`. API credentials are redacted from any error output.
+
 
 ## Configuration
 

@@ -1,0 +1,633 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Bitunix AI Agent Trader — Dashboard</title>
+<style>
+  :root {
+    --bg: #0b0d10;
+    --panel: #131820;
+    --panel-2: #181f2a;
+    --border: #252d3a;
+    --text: #e8eaf2;
+    --muted: #9399a8;
+    --accent: #38bdf8;
+    --ok: #22c55e;
+    --warn: #f59e0b;
+    --bad: #ef4444;
+    --row-hover: #1d2634;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html { background: var(--bg); color: var(--text); font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif; font-size: 14px; }
+  body { max-width: 1400px; margin: 0 auto; padding: 24px; }
+  header { display: flex; align-items: center; gap: 12px; margin-bottom: 24px; padding-bottom: 16px; border-bottom: 1px solid var(--border); flex-wrap: wrap; gap: 16px; }
+  h1 { font-size: 1.25rem; letter-spacing: -0.02em; }
+  .badge { display: inline-flex; align-items: center; gap: 6px; padding: 2px 10px; border-radius: 12px; background: var(--panel-2); border: 1px solid var(--border); color: var(--muted); font-size: 0.78rem; }
+  .badge .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--bad); }
+  .badge .dot.ok { background: var(--ok); }
+  .badge .dot.warn { background: var(--warn); }
+  .btn { background: var(--panel-2); border: 1px solid var(--border); color: var(--text); padding: 6px 12px; border-radius: 8px; cursor: pointer; font-size: 0.85rem; }
+  .btn:hover { background: var(--row-hover); border-color: var(--accent); }
+  .btn.primary { background: var(--accent); color: #00212a; border-color: var(--accent); }
+  .btn.primary:hover { background: #7dd3fc; }
+  .btn.danger { color: var(--bad); }
+  .btn.danger:hover { background: rgba(239,68,68,0.12); border-color: rgba(239,68,68,0.4); }
+  .btn.small { padding: 3px 8px; font-size: 0.78rem; }
+  .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+  .grid { display: grid; grid-template-columns: repeat(12, 1fr); gap: 16px; }
+  .card { grid-column: span 12; background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 16px; }
+  .card h2 { font-size: 0.9rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); margin-bottom: 12px; display: flex; justify-content: space-between; align-items: center; }
+  .grid-2 { grid-template-columns: repeat(2, 1fr); }
+  @media (max-width: 900px) { .grid-2 { grid-template-columns: 1fr; } .grid { grid-template-columns: 1fr; } }
+
+  table { width: 100%; border-collapse: collapse; font-size: 0.88rem; }
+  th { text-align: left; color: var(--muted); font-weight: 600; padding: 8px 6px; border-bottom: 1px solid var(--border); font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.04em; }
+  td { padding: 8px 6px; border-bottom: 1px solid var(--border); vertical-align: middle; }
+  tr:hover { background: var(--row-hover); }
+  tr:last-child td { border-bottom: none; }
+
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 0.82rem; }
+  .pill { display: inline-block; padding: 1px 7px; border-radius: 10px; font-size: 0.75rem; font-weight: 600; }
+  .pill.ok { background: rgba(34,197,94,0.15); color: var(--ok); border: 1px solid rgba(34,197,94,0.35); }
+  .pill.bad { background: rgba(239,68,68,0.15); color: var(--bad); border: 1px solid rgba(239,68,68,0.35); }
+  .pill.warn { background: rgba(245,158,11,0.15); color: var(--warn); border: 1px solid rgba(245,158,11,0.35); }
+  .pill.neutral { background: var(--panel-2); color: var(--muted); border: 1px solid var(--border); }
+  .long { color: var(--muted); }
+  .num { font-variant-numeric: tabular-nums; }
+  .pos { color: var(--ok); }
+  .neg { color: var(--bad); }
+  .zero { color: var(--muted); }
+
+  .setting { display: grid; grid-template-columns: 1fr auto auto 72px; gap: 10px; align-items: center; padding: 8px 6px; border-bottom: 1px solid var(--border); }
+  .setting:last-child { border-bottom: none; }
+  .setting .key { font-weight: 600; color: var(--accent); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .setting .desc { color: var(--muted); font-size: 0.82rem; grid-column: 1 / 3; }
+  .setting .range { color: var(--muted); font-size: 0.72rem; font-family: ui-monospace, monospace; text-align: right; white-space: nowrap; }
+  .setting input { background: #0f141a; border: 1px solid var(--border); color: var(--text); padding: 4px 8px; border-radius: 6px; font-size: 0.85rem; width: 100%; }
+  .setting input:focus { outline: none; border-color: var(--accent); }
+  .setting .save { display: none; background: var(--ok); color: #fff; border: none; border-radius: 6px; padding: 3px 10px; cursor: pointer; font-size: 0.78rem; font-weight: 600; }
+  .setting .save.show { display: inline-block; }
+  .setting .save.saving { opacity: 0.7; cursor: wait; }
+  .setting .err { color: var(--bad); font-size: 0.75rem; margin-top: 4px; grid-column: 1 / -1; }
+
+  .row-actions { display: flex; gap: 6px; }
+
+  .empty { color: var(--muted); font-style: italic; padding: 16px 0; }
+  .kpi { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 16px; }
+  .kpi .tile { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 12px 16px; min-width: 150px; }
+  .kpi .tile .label { color: var(--muted); font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 6px; }
+  .kpi .tile .value { font-size: 1.35rem; font-variant-numeric: tabular-nums; font-weight: 600; }
+  .kpi .tile .sub { color: var(--muted); font-size: 0.78rem; margin-top: 4px; }
+
+  .tabbar { display: flex; gap: 8px; margin-bottom: 12px; border-bottom: 1px solid var(--border); padding-bottom: 8px; }
+  .tab { background: transparent; border: none; color: var(--muted); padding: 8px 14px; cursor: pointer; font-size: 0.85rem; border-bottom: 2px solid transparent; }
+  .tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+  .tab:hover { color: var(--text); }
+  .tabcontent { display: none; }
+  .tabcontent.active { display: block; }
+
+  .group-title { color: var(--accent); font-weight: 700; margin: 14px 0 8px; font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.06em; }
+
+  .msg { padding: 8px 12px; border-radius: 8px; margin: 8px 0; font-size: 0.85rem; }
+  .msg.ok { background: rgba(34,197,94,0.1); border: 1px solid rgba(34,197,94,0.25); color: var(--ok); }
+  .msg.err { background: rgba(239,68,68,0.1); border: 1px solid rgba(239,68,68,0.25); color: var(--bad); }
+
+  .settings-pane { max-height: 70vh; overflow: auto; border: 1px solid var(--border); border-radius: 10px; background: #0f141a; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Bitunix AI Agent Trader</h1>
+  <span class="badge" id="badge-db"><span class="dot" id="dot-db"></span> DB <span id="txt-db">—</span></span>
+  <span class="badge" id="badge-health"><span class="dot"></span> <span id="txt-health">booting</span></span>
+  <span class="badge" id="badge-auto"><span class="dot"></span> Auto <span id="txt-auto">—</span></span>
+  <span class="badge" id="badge-scan"><span class="dot"></span> Scan <span id="txt-scan">—</span></span>
+  <span class="badge" id="badge-report"><span class="dot"></span> Reports <span id="txt-report">—</span></span>
+</header>
+
+<div class="kpi" id="kpis"></div>
+
+<div class="tabbar">
+  <button class="tab active" data-tab="settings">Settings</button>
+  <button class="tab" data-tab="positions">Positions</button>
+  <button class="tab" data-tab="signals">Signals</button>
+  <button class="tab" data-tab="trades">Trades</button>
+  <button class="tab" data-tab="events">Events</button>
+  <button class="tab" data-tab="status">Status</button>
+</div>
+
+<!-- SETTINGS -->
+<div class="tabcontent active" id="tab-settings">
+  <div class="card">
+    <h2>Live settings <button class="btn small btn-primary" onclick="refreshSettings()">refresh</button></h2>
+    <div class="settings-pane" id="settings-list"></div>
+    <div id="settings-msg"></div>
+  </div>
+</div>
+
+<!-- POSITIONS -->
+<div class="tabcontent" id="tab-positions">
+  <div class="card">
+    <h2>Open positions <button class="btn small btn-primary" onclick="refreshPositions()">refresh</button></h2>
+    <table>
+      <thead><tr><th>Symbol</th><th>Side</th><th>Leverage</th><th>Entry</th><th>Qty</th><th>uPnL</th><th>ROI</th><th>TP / SL</th><th>Actions</th></tr></thead>
+      <tbody id="positions-body"></tbody>
+    </table>
+    <div id="positions-empty" class="empty">No open positions.</div>
+  </div>
+</div>
+
+<!-- SIGNALS -->
+<div class="tabcontent" id="tab-signals">
+  <div class="card">
+    <h2>Recent signals <button class="btn small btn-primary" onclick="refreshSignals()">refresh</button></h2>
+    <table>
+      <thead><tr><th>Time</th><th>Symbol</th><th>Side</th><th>Confidence</th><th>Agreement</th><th>Regime</th><th>Taken</th><th>Reject reason</th></tr></thead>
+      <tbody id="signals-body"></tbody>
+    </table>
+    <div id="signals-empty" class="empty">No signals yet.</div>
+  </div>
+</div>
+
+<!-- TRADES -->
+<div class="tabcontent" id="tab-trades">
+  <div class="card">
+    <h2>Trades <button class="btn small btn-primary" onclick="refreshTrades()">refresh</button></h2>
+    <div class="kpi" style="gap:8px;">
+      <div class="tile"><div class="label">7d trades</div><div class="value" id="stat-trades">—</div></div>
+      <div class="tile"><div class="label">Wins / Losses</div><div class="value" id="stat-winloss">—</div></div>
+      <div class="tile"><div class="label">7d PnL</div><div class="value" id="stat-pnl">—</div></div>
+    </div>
+    <table>
+      <thead><tr><th>Opened</th><th>Symbol</th><th>Side</th><th>Entry</th><th>Qty</th><th>TP / SL</th><th>Status</th></tr></thead>
+      <tbody id="trades-body"></tbody>
+    </table>
+    <div id="trades-empty" class="empty">No trades yet.</div>
+  </div>
+</div>
+
+<!-- EVENTS -->
+<div class="tabcontent" id="tab-events">
+  <div class="card">
+    <h2>Agent events <button class="btn small btn-primary" onclick="refreshEvents()">refresh</button></h2>
+    <table>
+      <thead><tr><th>Time</th><th>Kind</th><th>Symbol</th><th>Payload</th></tr></thead>
+      <tbody id="events-body"></tbody>
+    </table>
+    <div id="events-empty" class="empty">No events yet.</div>
+  </div>
+</div>
+
+<!-- STATUS -->
+<div class="tabcontent" id="tab-status">
+  <div class="card">
+    <h2>Agent status <button class="btn small btn-primary" onclick="refreshStatus()">refresh</button></h2>
+    <div style="display:grid; grid-template-columns: 1fr 1fr; gap:16px;">
+      <div>
+        <div class="group-title">Runtime</div>
+        <table style="width:100%; font-size:0.85rem;">
+          <tr><td class="mono">Agent</td><td id="st-agent">—</td></tr>
+          <tr><td class="mono">DB connected</td><td id="st-db">—</td></tr>
+          <tr><td class="mono">Loops running</td><td id="st-running">—</td></tr>
+          <tr><td class="mono">Scanner</td><td id="st-scan">—</td></tr>
+          <tr><td class="mono">Reports</td><td id="st-report">—</td></tr>
+          <tr><td class="mono">Completed scans</td><td id="st-scans">—</td></tr>
+          <tr><td class="mono">Last scan</td><td id="st-lastscan">—</td></tr>
+          <tr><td class="mono">Last error</td><td class="mono" id="st-lasterr">—</td></tr>
+        </table>
+      </div>
+      <div>
+        <div class="group-title">Stats</div>
+        <table style="width:100%; font-size:0.85rem;">
+          <tr><td class="mono">Scans</td><td class="num" id="st-stat-scans">—</td></tr>
+          <tr><td class="mono">Signals</td><td class="num" id="st-stat-signals">—</td></tr>
+          <tr><td class="mono">Trades</td><td class="num" id="st-stat-trades">—</td></tr>
+          <tr><td class="mono">Reversals</td><td class="num" id="st-stat-reversals">—</td></tr>
+          <tr><td class="mono">Errors</td><td class="num" id="st-stat-errors">—</td></tr>
+          <tr><td class="mono">Uptime</td><td class="num" id="st-uptime">—</td></tr>
+        </table>
+        <div class="group-title" style="margin-top:16px;">Commands</div>
+        <div style="display:flex; flex-direction:column; gap:8px;">
+          <button class="btn w-full" id="btn-scan" onclick="toggleCommand('scan')">Scanner: ON</button>
+          <button class="btn w-full" id="btn-report" onclick="toggleCommand('reports')">Reports: ON</button>
+          <button class="btn w-full btn-danger" onclick="killSwitch()">🛑 Kill auto trading</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+const BASE = '';
+let polling = null;
+
+async function api(path, { method = 'GET', body } = {}) {
+  const opts = { method, headers: { 'content-type': 'application/json' } };
+  if (body) opts.body = JSON.stringify(body);
+  const res = await fetch(BASE + path, opts);
+  if (!res.ok) {
+    const t = await res.text().catch(() => '');
+    throw new Error(`${res.status} ${t}`);
+  }
+  return res.json();
+}
+
+function $(id) { return document.getElementById(id); }
+
+function escapeHtml(s) {
+  if (s == null) return '';
+  return String(s).replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":"&#39;" })[c]);
+}
+
+function fmtTime(iso) {
+  if (!iso) return '—';
+  try { return new Date(iso).toLocaleTimeString([], { hour12: false }); } catch { return iso; }
+}
+function fmtDate(iso) {
+  if (!iso) return '—';
+  try { return new Date(iso).toLocaleString([], { hour12: false }); } catch { return iso; }
+}
+
+function pct(v) {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return '—';
+  return (n >= 0 ? '+' : '') + n.toFixed(2) + '%';
+}
+function usd(v) {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return '—';
+  return (n >= 0 ? '+' : '') + n.toFixed(2) + ' USDT';
+}
+
+function pill(v) {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return '<span class="pill neutral">—</span>';
+  const cls = n > 0 ? 'ok' : (n < 0 ? 'neg' : 'neutral');
+  const sign = n > 0 ? '+' : '';
+  return `<span class="pill ${cls}">${sign}${n.toFixed(2)}%</span>`;
+}
+
+/* ---------- status ---------- */
+async function refreshStatus() {
+  try {
+    const st = await api('/api/status');
+    const h = await api('/api/health');
+
+    // badges
+    const dotDb = $('dot-db'); const txtDb = $('txt-db');
+    const dotHealth = $('badge-health').querySelector('.dot'); const txtHealth = $('txt-health');
+    const dotAuto = $('badge-auto').querySelector('.dot'); const txtAuto = $('txt-auto');
+    const dotScan = $('badge-scan').querySelector('.dot'); const txtScan = $('txt-scan');
+    const dotReport = $('badge-report').querySelector('.dot'); const txtReport = $('txt-report');
+
+    dotDb.className = 'dot ' + (st.db.connected ? 'ok' : 'bad');
+    txtDb.textContent = st.db.connected ? 'connected' : 'disconnected';
+    dotHealth.className = 'dot ok';
+    txtHealth.textContent = h.ok ? 'healthy' : 'unhealthy';
+    const txtAgent = $('st-agent');
+    if (txtAgent) txtAgent.textContent = st.agent || '—';
+
+    txtAuto.textContent = st.settings.auto_trade ? 'ON' : 'OFF';
+    dotAuto.className = 'dot ' + (st.settings.auto_trade ? 'ok' : 'bad');
+    txtAuto.parentElement.className = 'badge ' + (st.settings.auto_trade ? '' : '');
+
+    txtScan.textContent = st.orchestrator.scanningEnabled ? 'ON' : 'OFF';
+    dotScan.className = 'dot ' + (st.orchestrator.scanningEnabled ? 'ok' : 'bad');
+    $('btn-scan').textContent = 'Scanner: ' + (st.orchestrator.scanningEnabled ? 'ON' : 'OFF');
+
+    txtReport.textContent = st.orchestrator.reportsEnabled ? 'ON' : 'OFF';
+    dotReport.className = 'dot ' + (st.orchestrator.reportsEnabled ? 'ok' : 'bad');
+    $('btn-report').textContent = 'Reports: ' + (st.orchestrator.reportsEnabled ? 'ON' : 'OFF');
+
+    // status tab
+    $('st-agent').textContent = st.agent || '—';
+    $('st-db').textContent = st.db.connected ? 'connected' : 'disconnected';
+    $('st-running').textContent = st.orchestrator.running ? 'yes' : 'no';
+    $('st-scan').textContent = st.orchestrator.scanningEnabled ? 'ON' : 'OFF';
+    $('st-report').textContent = st.orchestrator.reportsEnabled ? 'ON' : 'OFF';
+    $('st-scans').textContent = st.orchestrator.scans ?? '—';
+    $('st-lastscan').textContent = st.orchestrator.lastScanAt ? fmtTime(st.orchestrator.lastScanAt) : 'not yet';
+    $('st-lasterr').textContent = st.orchestrator.lastScanError || '—';
+    $('st-lasterr').className = 'mono ' + (st.orchestrator.lastScanError ? 'neg' : '');
+
+    const stats = st.stats || {};
+    $('st-stat-scans').textContent = stats.scans ?? '—';
+    $('st-stat-signals').textContent = stats.signals ?? '—';
+    $('st-stat-trades').textContent = stats.trades ?? '—';
+    $('st-stat-reversals').textContent = stats.reversals ?? '—';
+    $('st-stat-errors').textContent = stats.errors ?? '—';
+    if (stats.startedAt) {
+      const up = Math.floor((Date.now() - stats.startedAt) / 1000);
+      $('st-uptime').textContent = `${Math.floor(up / 3600)}h ${Math.floor((up % 3600) / 60)}m ${up % 60}s`;
+    } else {
+      $('st-uptime').textContent = '—';
+    }
+
+    // KPIs
+    const kpis = $('kpis');
+    kpis.innerHTML = `
+      <div class="tile"><div class="label">DB</div><div class="value">${st.db.connected ? '●' : '○'}</div><div class="sub">${st.db.connected ? 'connected' : 'disconnected'}</div></div>
+      <div class="tile"><div class="label">Auto trade</div><div class="value ${st.settings.auto_trade ? 'pos' : 'neg'}">${st.settings.auto_trade ? 'ON' : 'OFF'}</div></div>
+      <div class="tile"><div class="label">Scanner</div><div class="value ${st.orchestrator.scanningEnabled ? 'pos' : 'neg'}">${st.orchestrator.scanningEnabled ? 'ON' : 'OFF'}</div></div>
+      <div class="tile"><div class="label">Symbols</div><div class="value">${st.settings.symbols || 'AUTO'}</div></div>
+      <div class="tile"><div class="label">Leverage</div><div class="value">${st.settings.leverage}x</div></div>
+    `;
+  } catch (e) {
+    showErr('status', e.message);
+  }
+}
+
+/* ---------- settings ---------- */
+async function refreshSettings() {
+  try {
+    const data = await api('/api/settings');
+    const list = $('settings-list');
+    list.innerHTML = '';
+    const info = data.info || {};
+    const keys = Object.keys(data.settings || {}).sort();
+    for (const k of keys) {
+      const v = data.settings[k];
+      const el = document.createElement('div');
+      el.className = 'setting';
+      el.dataset.key = k;
+      let input;
+      if (typeof v === 'boolean') {
+        input = document.createElement('select');
+        input.innerHTML = '<option value="true">true</option><option value="false">false</option>';
+        input.value = String(v);
+      } else if (Array.isArray(v)) {
+        input = document.createElement('input');
+        input.type = 'text';
+        input.value = v.join(',');
+      } else {
+        input = document.createElement('input');
+        input.type = 'text';
+        input.value = String(v);
+      }
+      const save = document.createElement('button');
+      save.className = 'save';
+      save.textContent = 'save';
+      save.onclick = () => saveSetting(k, input.value, save);
+      input.oninput = () => { save.classList.add('show'); $(`msg-${k}`)?.remove(); };
+      const inf = info[k];
+      const desc = document.createElement('div');
+      desc.className = 'desc';
+      desc.textContent = (inf && inf[0]) || '';
+      const range = document.createElement('div');
+      range.className = 'range';
+      range.textContent = (inf && inf[1]) || '';
+      const keydiv = document.createElement('div');
+      keydiv.className = 'key';
+      keydiv.textContent = k;
+      el.appendChild(keydiv);
+      el.appendChild(desc);
+      el.appendChild(range);
+      el.appendChild(input);
+      el.appendChild(save);
+      list.appendChild(el);
+    }
+    $('settings-msg').innerHTML = '';
+  } catch (e) {
+    showErr('settings-msg', e.message);
+  }
+}
+
+async function saveSetting(key, raw, btn) {
+  const errId = 'msg-' + key;
+  let old = document.getElementById(errId);
+  if (old) old.remove();
+  btn.classList.remove('show');
+  btn.classList.add('saving');
+  btn.disabled = true;
+  try {
+    const res = await api('/api/settings/' + encodeURIComponent(key), { method: 'POST', body: { value: raw } });
+    const el = document.querySelector('.setting[data-key="' + CSS.escape(key) + '"]');
+    const msg = document.createElement('div');
+    msg.id = errId;
+    msg.className = res.error ? 'err' : '';
+    msg.textContent = res.error || ('persisted: ' + (res.persisted ? 'yes' : 'no (in memory only)'));
+    if (el) el.appendChild(msg);
+    if (!res.error) {
+      btn.classList.remove('show');
+      setTimeout(() => { if (btn) btn.classList.remove('show'); }, 1200);
+    }
+  } catch (e) {
+    const msg = document.createElement('div');
+    msg.id = errId;
+    msg.className = 'err';
+    msg.textContent = e.message;
+    if (el) el.appendChild(msg);
+  } finally {
+    btn.classList.remove('saving');
+    btn.disabled = false;
+  }
+}
+
+/* ---------- positions ---------- */
+async function refreshPositions() {
+  try {
+    const data = await api('/api/positions');
+    const body = $('positions-body');
+    const empty = $('positions-empty');
+    body.innerHTML = '';
+    const positions = data.positions || [];
+    if (positions.length) {
+      empty.style.display = 'none';
+      for (const p of positions) {
+        const upnl = p.unrealizedPNL != null ? Number(p.unrealizedPNL) : 0;
+        const roi = p.roi != null ? Number(p.roi) : 0;
+        const sideCls = p.side === 'LONG' ? 'pos' : 'neg';
+        const row = document.createElement('tr');
+        row.innerHTML = `
+          <td><span class="mono">${escapeHtml(p.symbol)}</span></td>
+          <td><span class="pill ${sideCls}">${escapeHtml(p.side)}</span></td>
+          <td class="num">${Number(p.leverage || 0).toFixed(0)}x</td>
+          <td class="num mono">${p.entry_price != null ? p.entry_price.toFixed(6) : '—'}</td>
+          <td class="num mono">${p.qty != null ? p.qty.toFixed(6) : '—'}</td>
+          <td class="num ${upnl >= 0 ? 'pos' : 'neg'}">${usd(upnl)}</td>
+          <td class="num ${roi >= 0 ? 'pos' : 'neg'}">${pct(roi)}</td>
+          <td class="mono">${p.tp_price ? p.tp_price.toFixed(6) : '—'} / ${p.sl_price ? p.sl_price.toFixed(6) : '—'}</td>
+          <td class="row-actions">
+            <button class="btn small btn-danger" onclick="closePosition('${escapeHtml(p.symbol)}','${escapeHtml(String(p.position_id || p.id))}')">close</button>
+          </td>
+        `;
+        body.appendChild(row);
+      }
+    } else {
+      empty.style.display = 'block';
+    }
+  } catch (e) {
+    showErr('positions', e.message);
+  }
+}
+
+/* ---------- signals ---------- */
+async function refreshSignals() {
+  try {
+    const data = await api('/api/signals');
+    const body = $('signals-body');
+    const empty = $('signals-empty');
+    body.innerHTML = '';
+    const signals = data.signals || [];
+    if (signals.length) {
+      empty.style.display = 'none';
+      for (const s of signals) {
+        const conf = Number(s.confidence || 0);
+        const cls = conf >= 80 ? 'ok' : (conf >= 60 ? 'warn' : 'bad');
+        const taken = s.taken ? '<span class="pill ok">yes</span>' : '<span class="pill bad">no</span>';
+        const reject = s.reject_reason ? escapeHtml(s.reject_reason) : '—';
+        const row = document.createElement('tr');
+        row.innerHTML = `
+          <td class="mono">${fmtTime(s.created_at)}</td>
+          <td class="mono">${escapeHtml(s.symbol)}</td>
+          <td><span class="pill ${s.side === 'LONG' ? 'pos' : 'neg'}">${escapeHtml(s.side)}</span></td>
+          <td class="num"><span class="pill ${cls}">${conf}%</span></td>
+          <td class="num">${s.agreement != null ? s.agreement + '/10' : '—'}</td>
+          <td class="mono">${escapeHtml(s.regime || '—')}</td>
+          <td>${taken}</td>
+          <td class="long">${reject}</td>
+        `;
+        body.appendChild(row);
+      }
+    } else {
+      empty.style.display = 'block';
+    }
+  } catch (e) {
+    showErr('signals', e.message);
+  }
+}
+
+/* ---------- trades ---------- */
+async function refreshTrades() {
+  try {
+    const data = await api('/api/trades');
+    const body = $('trades-body');
+    const empty = $('trades-empty');
+    body.innerHTML = '';
+    const trades = data.open || [];
+    const stats = data.stats || {};
+    $('stat-trades').textContent = stats.trades ?? '—';
+    $('stat-winloss').textContent = `${stats.wins ?? '—'} / ${stats.losses ?? '—'}`;
+    const pnl = Number(stats.pnl || 0);
+    $('stat-pnl').textContent = usd(pnl);
+    $('stat-pnl').className = pnl >= 0 ? 'pos' : 'neg';
+    if (trades.length) {
+      empty.style.display = 'none';
+      for (const t of trades) {
+        const row = document.createElement('tr');
+        row.innerHTML = `
+          <td class="mono">${fmtDate(t.opened_at)}</td>
+          <td class="mono">${escapeHtml(t.symbol)}</td>
+          <td><span class="pill ${t.side === 'LONG' ? 'pos' : 'neg'}">${escapeHtml(t.side)}</span></td>
+          <td class="num mono">${t.entry_price != null ? Number(t.entry_price).toFixed(6) : '—'}</td>
+          <td class="num mono">${t.qty != null ? Number(t.qty).toFixed(6) : '—'}</td>
+          <td class="mono">${t.tp_price ? Number(t.tp_price).toFixed(6) : '—'} / ${t.sl_price ? Number(t.sl_price).toFixed(6) : '—'}</td>
+          <td><span class="pill neutral">${escapeHtml(t.status || 'OPEN')}</span></td>
+        `;
+        body.appendChild(row);
+      }
+    } else {
+      empty.style.display = 'block';
+    }
+  } catch (e) {
+    showErr('trades', e.message);
+  }
+}
+
+/* ---------- events ---------- */
+async function refreshEvents() {
+  try {
+    const data = await api('/api/events');
+    const body = $('events-body');
+    const empty = $('events-empty');
+    body.innerHTML = '';
+    const events = data.events || [];
+    if (events.length) {
+      empty.style.display = 'none';
+      for (const e of events) {
+        const row = document.createElement('tr');
+        let payload = '—';
+        try { payload = typeof e.payload === 'string' ? e.payload : JSON.stringify(e.payload); } catch {}
+        row.innerHTML = `
+          <td class="mono">${fmtTime(e.created_at)}</td>
+          <td class="mono">${escapeHtml(e.kind)}</td>
+          <td class="mono">${escapeHtml(e.symbol || '—')}</td>
+          <td class="long mono">${escapeHtml(payload).slice(0, 200)}</td>
+        `;
+        body.appendChild(row);
+      }
+    } else {
+      empty.style.display = 'block';
+    }
+  } catch (err) {
+    showErr('events', err.message);
+  }
+}
+
+/* ---------- commands ---------- */
+async function toggleCommand(name) {
+  try {
+    const btn = name === 'scan' ? $('btn-scan') : $('btn-report');
+    const cur = btn.textContent.includes(': ON');
+    const res = await api('/api/command/' + name, { method: 'POST', body: { enabled: !cur } });
+    if (res.error) { alert('Failed: ' + res.error); return; }
+    refreshStatus();
+  } catch (e) { alert('Failed: ' + e.message); }
+}
+
+async function killSwitch() {
+  if (!confirm('This disables auto trading immediately. Open positions stay open but no new entries will be taken. Continue?')) return;
+  try {
+    await api('/api/command/kill', { method: 'POST', body: {} });
+    refreshStatus();
+    refreshSettings();
+    showOk('settings-msg', 'Auto trading disabled (kill switch).');
+  } catch (e) { alert('Failed: ' + e.message); }
+}
+
+async function closePosition(symbol, positionId) {
+  if (!confirm(`Close position ${symbol} (${positionId})?`)) return;
+  // Close via dashboard server command endpoint if available; otherwise notify user to use Telegram.
+  alert('Use /close ' + symbol + ' in Telegram, or add a close endpoint to the dashboard.');
+}
+
+/* ---------- ui helpers ---------- */
+function showOk(where, text) {
+  const el = $(where);
+  if (!el) return;
+  el.innerHTML = '<div class="msg ok">' + escapeHtml(text) + '</div>';
+  setTimeout(() => el.innerHTML = '', 3000);
+}
+function showErr(where, text) {
+  const el = $(where);
+  if (!el) return;
+  el.innerHTML = '<div class="msg err">' + escapeHtml(text) + '</div>';
+}
+
+/* ---------- tabs ---------- */
+document.querySelectorAll('.tab').forEach(tab => {
+  tab.addEventListener('click', () => {
+    document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+    document.querySelectorAll('.tabcontent').forEach(tc => tc.classList.remove('active'));
+    tab.classList.add('active');
+    $(`tab-${tab.dataset.tab}`).classList.add('active');
+  });
+});
+
+/* ---------- poll ---------- */
+async function tick() {
+  await refreshStatus();
+  await refreshSettings();
+  await refreshPositions();
+  await refreshSignals();
+  await refreshTrades();
+  await refreshEvents();
+}
+function startPoll() { if (polling) clearInterval(polling); polling = setInterval(tick, 4000); tick(); }
+startPoll();
+
+</script>
+</body>
+</html>
