@@ -576,6 +576,12 @@ export function computeMargin({ available, marginPct, openPositions, maxPosition
   const slotsLeft = Math.max(1, Number(maxPositions) - Number(openPositions));
   const cap = Number(available) / slotsLeft;
   if (margin > cap) margin = cap;
+  // Leave a buffer for exchange fees and margin requirements.
+  // Using 100% of available balance leaves no room for taker fees, causing
+  // Bitunix error 20003 (insufficient balance) even when the balance
+  // appears sufficient on paper. 80% buffer leaves room for fees and
+  // exchange-side margin requirements.
+  margin = margin * 0.80;
   return Math.max(0, margin);
 }
 
