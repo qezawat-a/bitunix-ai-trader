@@ -9,7 +9,7 @@
  * be verified.
  */
 
-import { trailingStop } from '../src/trading/risk.js';
+import { trailingStop, ROUND_TRIP_FEE } from '../src/trading/risk.js';
 import { setSetting } from '../src/db/index.js';
 
 // Hermetic pin: trailingStop() reads live settings(), so without this the
@@ -36,8 +36,8 @@ console.log('\nBreakeven band (20% <= ROI < 25%)');
 const be = trailingStop({ ...LONG, currentPrice: 10200, roiPct: 20 });
 assert(be !== null, 'ROI 20% -> a stop is placed');
 assert(be.reason === 'breakeven', `reason is "breakeven" (got "${be.reason}")`);
-assert(Math.abs(be.stop - 10000 * 1.0008) < 1e-6,
-  `stop = entry + fee buffer = ${be.stop.toFixed(4)} (entry ${LONG.entry}, buffer ${(LONG.entry * 0.0008).toFixed(4)})`);
+assert(Math.abs(be.stop - 10000 * (1 + ROUND_TRIP_FEE)) < 1e-6,
+  `stop = entry + fee buffer = ${be.stop.toFixed(4)} (entry ${LONG.entry}, buffer ${(LONG.entry * ROUND_TRIP_FEE).toFixed(2)})`);
 const be24 = trailingStop({ ...LONG, currentPrice: 10240, roiPct: 24 });
 assert(be24.stop === be.stop, 'ROI 24% still breakeven, stop unchanged');
 
@@ -58,7 +58,7 @@ assert(weakAtr.stop > wideAtr.stop,
 
 console.log('\nShort side is mirrored');
 const sb = trailingStop({ ...LONG, side: 'SHORT', currentPrice: 9800, roiPct: 20 });
-assert(Math.abs(sb.stop - 10000 * 0.9992) < 1e-6,
+assert(Math.abs(sb.stop - 10000 * (1 - ROUND_TRIP_FEE)) < 1e-6,
   `SHORT breakeven = entry - fee buffer = ${sb.stop.toFixed(4)}`);
 const st = trailingStop({ ...LONG, side: 'SHORT', currentPrice: 9700, roiPct: 30 });
 assert(Math.abs(st.stop - (9700 + 25)) < 1e-6, `SHORT trailing = price + 0.5*ATR = ${st.stop.toFixed(4)}`);
@@ -99,13 +99,13 @@ console.log('\nMissing ATR points to breakeven, never to a market-price stop');
 // correct answer is the breakeven floor.
 const noAtr = trailingStop({ ...LONG, currentPrice: 10300, roiPct: 30, atr: null });
 assert(noAtr !== null, 'ROI above trigger with no ATR still returns protection');
-assert(Math.abs(noAtr.stop - 10000 * 1.0008) < 1e-6,
+assert(Math.abs(noAtr.stop - 10000 * (1 + ROUND_TRIP_FEE)) < 1e-6,
   `no ATR -> breakeven stop ${noAtr.stop.toFixed(2)}, not the market price`);
 assert(noAtr.reason.includes('breakeven'), `reason says breakeven (got "${noAtr.reason}")`);
 const zeroAtr = trailingStop({ ...LONG, currentPrice: 10300, roiPct: 30, atr: 0 });
-assert(Math.abs(zeroAtr.stop - 10000 * 1.0008) < 1e-6, 'atr=0 is treated as missing, not as a zero-distance trail');
+assert(Math.abs(zeroAtr.stop - 10000 * (1 + ROUND_TRIP_FEE)) < 1e-6, 'atr=0 is treated as missing, not as a zero-distance trail');
 const shortNoAtr = trailingStop({ ...LONG, side: 'SHORT', currentPrice: 9700, roiPct: 30, atr: null });
-assert(Math.abs(shortNoAtr.stop - 10000 * 0.9992) < 1e-6,
+assert(Math.abs(shortNoAtr.stop - 10000 * (1 - ROUND_TRIP_FEE)) < 1e-6,
   `SHORT no-ATR breakeven sits below entry (${shortNoAtr.stop.toFixed(4)})`);
 
 console.log('\nEnd-to-end: the exact case that used to never trigger');

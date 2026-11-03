@@ -4,7 +4,7 @@ import { validateSetting } from '../settings-schema.js';
 import mcpClient from '../mcp/client.js';
 import { scan, analyseSymbol, consensus, buildUniverse, getCandles } from '../scanner/scanner.js';
 import { runAnalysis } from './analysis-agent.js';
-import { computeDynamicTpSl } from '../trading/risk.js';
+import { computeDynamicTpSl, breakevenPrice } from '../trading/risk.js';
 import {
   openFromSignal, closePosition, closeAll, upsertPositionTpSl,
   availableBalance, reverse, resetSymbolConfigCache,
@@ -319,9 +319,9 @@ export const TOOLS = [
       if (!match) return { ok: false, reason: `no matching open position found (active: ${ps.map(p => p.symbol).join(', ') || 'none'})` };
 
       const entry = Number(match.avgOpenPrice);
-      const isLong = match.side === 'LONG';
-      // slightly above entry for long, below for short to cover taker fees
-      const bePrice = isLong ? entry * 1.0008 : entry * 0.9992;
+      // The price that really closes flat: both legs are taker (0.06% x2). The
+      // old 1.0008 was inside that band, so "breakeven" produced a small loss.
+      const bePrice = breakevenPrice({ side: match.side, entry });
       return upsertPositionTpSl({
         symbol: match.symbol,
         positionId: String(match.positionId),

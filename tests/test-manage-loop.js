@@ -26,7 +26,7 @@ import bitunix, { normalizePositionRows } from '../src/exchange/bitunix.js';
 import { manageOpenPositions, positionRoi, resetGuardState } from '../src/trading/manager.js';
 import { resetSymbolConfigCache, resetStopMemory } from '../src/trading/executor.js';
 import { resetKlineCache } from '../src/scanner/scanner.js';
-import { trailingStop, breakevenStop } from '../src/trading/risk.js';
+import { trailingStop, breakevenStop, ROUND_TRIP_FEE } from '../src/trading/risk.js';
 import { resetTrailing } from '../src/trading/tpsl.js';
 import { setSetting } from '../src/db/index.js';
 
@@ -254,7 +254,7 @@ async function test() {
   //   pass 1 @ 11000: pnl 100 -> ROI 40% -> trail = 11000 - 0.5 x ATR100 = 10950
   //   pass 2 @ 10600: pnl  60 -> ROI 24% -> still past breakeven but below the
   //                    trailing trigger, so the engine drops back to entry + fees
-  //                    = 10008. That is LOOSER, and must be refused.
+  //                    = 10013. That is LOOSER, and must be refused.
   pendingBook = [{ tpPrice: 12000, slPrice: 9900 }];
   reset();
   livePos = [mkPos({ qty: 0.1, unrealizedPNL: 100, markPrice: 11000, leverage: 4, liqPrice: 7550 })];
@@ -299,7 +299,7 @@ async function test() {
   const tightMove = tight.actions.find((a) => a.type === 'stop_moved');
   assert(tightMove !== undefined, 'the stop was moved');
   if (tightMove) {
-    assert(Math.abs(tightMove.stop - 10008) < 1e-9,
+    assert(Math.abs(tightMove.stop - 10000 * (1 + ROUND_TRIP_FEE)) < 1e-9,
       `profit-side stop NOT rewritten (SL ${tightMove.stop}, old bug gave 9995)`);
     assert(!String(tightMove.reason).includes('clamped'),
       `no clamp note in the reason ("${tightMove.reason}")`);
@@ -372,7 +372,7 @@ async function test() {
   if (tMove) {
     assert(String(tMove.reason).startsWith('trailing'),
       `reason is the trailing step ("${tMove.reason}")`);
-    assert(tMove.stop > 10008, `it is ahead of the breakeven floor (${tMove.stop} > 10008)`);
+    assert(tMove.stop > 10000 * (1 + ROUND_TRIP_FEE), `it is ahead of the breakeven floor (${tMove.stop})`);
     assert(tMove.stop < 10200, `and still below the market (${tMove.stop} < 10200)`);
   }
   setCentre(10000);
@@ -493,7 +493,7 @@ async function test() {
       `same reason ("${direct.reason}" vs "${viaTrail.reason}")`);
     // A SHORT mirrors it below entry.
     const short = breakevenStop({ side: 'SHORT', entry: 10000, liqPrice: 10400 });
-    assert(close(short.stop, 9992), `a SHORT floor sits below entry (${short.stop})`);
+    assert(close(short.stop, 10000 * (1 - ROUND_TRIP_FEE)), `a SHORT floor sits below entry (${short.stop})`);
   }
 
   console.log('\nAn unreachable exchange is a no-op, never a wrong action');

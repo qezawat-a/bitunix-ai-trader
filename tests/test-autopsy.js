@@ -130,4 +130,14 @@ ok(exits.findings.some((f) => /closed SHALLOWER than their own planned stop/.tes
 ok(exits.findings.some((f) => /closed BEYOND their planned stop/.test(f)),
   'an exit past the stop (late fill / slippage) is reported too');
 
+const flat = summarize([
+  T({ exit_price: 99.99, realized_pnl: -0.01 }),   // -0.01%: inside the fee band
+  T({ exit_price: 99.98, realized_pnl: -0.01 }),
+  T({ exit_price: 99.70, realized_pnl: -0.05 }),   // a real stop-out
+  T({ exit_price: 99.30, realized_pnl: -0.07 }),
+]);
+ok(flat.flatLosses === 2, `losses closed inside the fee band are counted (${flat.flatLosses})`);
+ok(flat.findings.some((f) => /within 0.15% of their entry/.test(f)),
+  'and they are named for what they are: scratches that cost commission');
+
 console.log(`\n${passed} passed, ${failed} failed`); process.exit(failed ? 1 : 0);

@@ -202,6 +202,10 @@ export function summarize(rows, opts = {}) {
     medianBeyondPct: median(beyondStop.map(adverseOf)),
     medianBeyondStopPct: median(beyondStop.map((x) => x.slPct)),
   };
+  // Losses closed inside the fee band: the trade barely moved, so the round trip
+  // (two taker legs ~0.12%) is the whole result. These are winners/scratches the
+  // account paid for, not market losses.
+  const flatLosses = t.filter((x) => x.pnl < 0 && Number.isFinite(x.movePct) && Math.abs(x.movePct) < 0.15);
 
   const findings = [];
   if (t.length < 20) findings.push(`Only ${t.length} closed trades: treat every conclusion below as a lead, not proof.`);
@@ -221,6 +225,9 @@ export function summarize(rows, opts = {}) {
   if (measured && beyondTpHi > 0) findings.push(`${beyondTpHi} of ${slHits.length} stop-outs went PAST their planned TP distance at some point (${beyondTpLo} even excluding the entry minute). Careful: the planned TP is the single target recorded at entry - a ladder (partial TPs) puts the real exits elsewhere - and this is the max of the 1m mark series, so it says what PRICE did, not which orders the exchange held. Treat it as a reason to look (/tpsl SYMBOL), not as proof a target was missing.`);
   if (medSl > 0 && medSl < 0.5) findings.push(`Stops are tight: median planned stop is ${medSl.toFixed(2)}% of price, inside normal 1m-5m noise.`);
   if (losses.length && quickLosses / losses.length >= 0.5) findings.push(`${quickLosses} of ${losses.length} losses closed within 5 minutes: entries are being stopped by noise right after opening.`);
+  if (flatLosses.length >= 2 && flatLosses.length / losses.length >= 0.2) {
+    findings.push(`${flatLosses.length} of ${losses.length} losses closed within 0.15% of their entry: the trade barely moved, so the ~0.12% round trip (two taker legs) is the whole result. Those are scratches that cost commission — a "breakeven" exit parked at +0.08% is a loss for exactly this reason (fixed: the floor now covers both legs).`);
+  }
   if (exitVsStop.n >= 3) {
     if (exitVsStop.shortOfStop / exitVsStop.n >= 0.3) {
       findings.push(`${exitVsStop.shortOfStop} of ${exitVsStop.n} losing trades closed SHALLOWER than their own planned stop (median move ${exitVsStop.medianShortPct.toFixed(2)}% against a stop at ${exitVsStop.medianShortStopPct.toFixed(2)}%): the stop did not close them. Something else did — a software stop, an agent/manual close, an account-level flatten — or the stop the exchange held was tighter than the one recorded at entry. Compare orders, not prices: /diagnose SYMBOL on a fresh loss.`);
@@ -247,7 +254,7 @@ export function summarize(rows, opts = {}) {
       beyondTpHi, beyondTpLo, armedButLost: armed, neverArmed: notArmed, bestMoveBuckets,
     },
     longs, shorts: t.length - longs, entryContext: ctx,
-    exitVsStop,
+    exitVsStop, flatLosses: flatLosses.length,
     reasons, findings,
   };
 }

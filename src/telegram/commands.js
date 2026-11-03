@@ -22,6 +22,7 @@ import { STRATEGY_COUNT } from '../strategies/index.js';
 import { dream as dreamCycle, formatDream, gather as gatherDream } from '../ai/dream.js';
 import { validateSetting } from '../settings-schema.js';
 import { availableBalance, closePosition, closeAll, resetSymbolConfigCache } from '../trading/executor.js';
+import { breakevenPrice } from '../trading/risk.js';
 import { portfolioSnapshot, livePositions, exchangePerformance } from '../trading/manager.js';
 import {
   HELP, md, mdt, bold, italic, fmtNum, usd, pct, agentText,
@@ -1040,8 +1041,10 @@ export function createCommandHandler(ctx) {
         return reply(chatId, mdt`❌ No open position found. Open positions: ${ps.map(p => p.symbol).join(', ') || 'none'}. Usage: /be <symbol>`);
       }
       const entry = Number(match.avgOpenPrice);
-      const isLong = match.side === 'LONG';
-      const bePrice = isLong ? entry * 1.0008 : entry * 0.9992;
+      // Same "no loss after fees" price the automatic floor uses. The old
+      // hardcoded 1.0008 sat inside the 0.12% taker round trip, so "/be" parked
+      // the stop where the exit was a small LOSS.
+      const bePrice = breakevenPrice({ side: match.side, entry });
       const r = await upsertPositionTpSl({
         symbol: match.symbol,
         positionId: String(match.positionId),

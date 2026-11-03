@@ -500,8 +500,32 @@ export function computeDynamicTpSl(signal) {
 }
 
 /**
- * The breakeven stop: entry shifted by a round-turn fee buffer, so the position
- * closes at 0 instead of paying commission to end flat.
+ * What a round trip actually costs, as a fraction of notional.
+ *
+ * THE BUG THIS FIXES: the breakeven stop was entry +/- 0.08%, on the reading
+ * that "0.05% maker / 0.06% taker" averages out. It does not: both legs of these
+ * trades are TAKERS (the entry is MARKET, and tpOrderType/slOrderType are
+ * MARKET), so the real cost is 0.06% + 0.06% = 0.12%. A "breakeven" exit at
+ * +0.08% therefore books a LOSS of about 0.04%, plus the gap between the mark
+ * price that triggers and the price the market order fills at.
+ *
+ * That is exactly the bucket the autopsy keeps reporting - "profit exit before
+ * TP: 7 trades, 3 wins" - trades that moved in your favour, were parked at the
+ * breakeven floor, and still cost money. Every one of them is a win that the
+ * account pays for. Hence: cover the two taker legs and leave a small margin
+ * for the trigger-to-fill gap, so "breakeven" really is no loss.
+ */
+export const ROUND_TRIP_FEE = 0.0013;   // 0.12% taker x2 + 0.01% trigger/fill slack
+
+/** The price at which a position closes flat after fees. */
+export function breakevenPrice({ side, entry }) {
+  const e = Number(entry);
+  if (!(e > 0)) return null;
+  return side === 'LONG' ? e * (1 + ROUND_TRIP_FEE) : e * (1 - ROUND_TRIP_FEE);
+}
+
+/**
+ * The breakeven stop: the flat-after-fees price, clamped inside liquidation.
  *
  * Extracted from trailingStop() so the RATIO/INTERVAL trailing families can use
  * the same floor. They used to jump straight from the wide entry stop to the
@@ -511,10 +535,8 @@ export function computeDynamicTpSl(signal) {
  */
 export function breakevenStop({ side, entry, liqPrice = null }) {
   const isLong = side === 'LONG';
-  // Round-turn fee buffer: 0.08% of entry covers both legs at the documented
-  // 0.05% maker / 0.06% taker rates without assuming which one filled.
-  const feeBuffer = entry * 0.0008;
-  let stop = isLong ? entry + feeBuffer : entry - feeBuffer;
+  let stop = breakevenPrice({ side, entry });
+  if (stop == null) return { stop: Number(entry), reason: 'breakeven' };
   let reason = 'breakeven';
 
   // Never hand the exchange a stop behind liquidation, even a breakeven one:
