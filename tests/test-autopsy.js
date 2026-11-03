@@ -103,4 +103,15 @@ console.log('\nThe excursion window is the trade\'s own life, not the 200 bars t
     'an inverted window returns nothing instead of the whole page');
 }
 
+const unmeasured = summarize([
+  T({ exit_price: 99.57, realized_pnl: -0.05, close_reason: 'exchange_close' }),
+  T({ exit_price: 99.57, realized_pnl: -0.05, close_reason: 'exchange_close' }),
+  T({ exit_price: 99.57, realized_pnl: -0.05, close_reason: 'exchange_close' }),
+], { breakevenRoi: 20 });
+ok(unmeasured.stopOuts.total === 3 && unmeasured.stopOuts.n === 0 && unmeasured.stopOuts.measured === false,
+  'stop-outs with no candle data are counted but not measured');
+ok(unmeasured.findings.some((f) => /only 0 had usable candles/.test(f)), 'and the report says so instead of guessing');
+ok(!unmeasured.findings.some((f) => /went PAST their planned TP|went at least half-way|touched their breakeven arming level/.test(f)),
+  'no excursion finding is invented from missing candles');
+
 console.log(`\n${passed} passed, ${failed} failed`); process.exit(failed ? 1 : 0);

@@ -145,7 +145,16 @@ export function summarize(rows, opts = {}) {
   for (const x of t) { const k = Number.isFinite(x.leverage) ? `${x.leverage}x` : '?'; const b = (byLev[k] ||= { n: 0, wins: 0, pnl: 0 }); b.n += 1; b.wins += x.pnl > 0 ? 1 : 0; b.pnl += x.pnl; }
   const leverages = Object.entries(byLev).map(([lev, b]) => ({ lev, ...b })).sort((a, b) => a.pnl - b.pnl);
 
-  const slHits = t.filter((x) => x.reason === 'inferred_sl_hit' && Number.isFinite(x.mfe));
+  // Stop-outs, and how many of them we could actually MEASURE. The excursion
+  // comes from 1m mark candles covering the trade's own life; when the endpoint
+  // returns no usable window for a trade, saying nothing is the honest answer —
+  // an earlier version compared whatever candles came back and produced
+  // "13 of 14 went past their TP" out of price action from hours before the
+  // trade existed.
+  const stopOuts = t.filter((x) => x.reason === 'inferred_sl_hit');
+  const slHits = stopOuts.filter((x) => Number.isFinite(x.mfe));
+  const coverage = stopOuts.length ? slHits.length / stopOuts.length : 0;
+  const measured = slHits.length >= 3 && coverage >= 0.6;
   const reachedHalf = slHits.filter((x) => Number.isFinite(x.tpPct) && x.mfe >= x.tpPct * 0.5).length;
   const neverWorked = slHits.filter((x) => x.mfe < 0.15).length;
   const medMfeSl = median(slHits.map((x) => x.mfe));
@@ -174,16 +183,17 @@ export function summarize(rows, opts = {}) {
   if (Number.isFinite(beFee)) findings.push(`In price terms (avg win ${(wMove + feePct).toFixed(2)}% / avg loss ${(lMove - feePct).toFixed(2)}%, minus ~${feePct}% round-trip fees) break-even needs a ${(beFee * 100).toFixed(0)}% win rate. Actual ${(winRate * 100).toFixed(0)}% (95% range ${(ci[0] * 100).toFixed(0)}-${(ci[1] * 100).toFixed(0)}%)${ci[1] < beFee ? ': clearly below break-even.' : ci[0] > beFee ? ': above break-even.' : ': break-even is inside that range, too few trades to call it.'}`);
   if (notW > 0 && notL > 0 && notL > notW * 1.5) findings.push(`Losing trades were bigger: avg notional ${notL.toFixed(2)} USDT on losers vs ${notW.toFixed(2)} on winners, which is why USDT losses outweigh USDT wins even though price moves favour the wins.`);
   if (medTp > 0 && avgWinMove > 0 && avgWinMove < medTp * 0.6) findings.push(`Winners are cut early: they capture ${avgWinMove.toFixed(2)}% of price on average vs a planned TP distance of ${medTp.toFixed(2)}% (${(avgWinMove / medTp * 100).toFixed(0)}%). Look at the close_reason rows below for what closes them.`);
-  if (slHits.length >= 3) findings.push(`Of ${slHits.length} stop-outs: ${reachedHalf} first went at least half-way to the target (stop/trailing too slow or too tight), ${neverWorked} never got more than 0.15% in favour (entry timing/direction wrong from the first minute). Median best move before the stop: ${medMfeSl.toFixed(2)}%.`);
+  if (measured) findings.push(`Of ${slHits.length} stop-outs with candle data: ${reachedHalf} went at least half-way to the planned target at some point, ${neverWorked} never got more than 0.15% in favour. Median best move before the stop: ${medMfeSl.toFixed(2)}% (1m mark series, inside the trade's own life). This is the ceiling of what price OFFERED between polls - a wick can be gone before the guard's next pass, so it is not proof the stop could have moved.`);
+  else if (stopOuts.length >= 3) findings.push(`${stopOuts.length} stop-outs, but only ${slHits.length} had usable candles for their own life: the "how far did it go in favour" measures are left out rather than guessed from the wrong hours.`);
   if (Number.isFinite(beRoi) && medTp > 0) {
     const lv = [10, 20, 40].map((l) => `${l}x: ${(beRoi / l).toFixed(2)}%`).join(', ');
     findings.push(`Breakeven arms at ${beRoi}% ROI = price move of ${lv}; the median planned TP is only ${medTp.toFixed(2)}%. Where the arming distance is at or beyond the TP, breakeven can never protect a trade before the TP/stop decides it.`);
-    if (slHits.length >= 3) findings.push(`Of ${slHits.length} stop-outs: ${armed} reached their breakeven arming level and still lost (the stop should have moved: check /diagnose), ${notArmed} never reached it.`);
+    if (measured) findings.push(`Of ${slHits.length} stop-outs: ${armed} touched their breakeven arming level at some point on the 1m series, ${notArmed} never did. Touching a level between two guard passes is not the same as being tradeable: a wick can appear and vanish in seconds, so this does not by itself mean the stop should have moved.`);
   }
   if (t.length >= 5 && (longs === 0 || longs === t.length || longs / t.length >= 0.85 || longs / t.length <= 0.15)) findings.push(`Direction is lopsided: ${longs} LONG / ${t.length - longs} SHORT.`);
   if (ctx && ctx.n >= 5 && ctx.chasing / ctx.n >= 0.5) findings.push(`Entries chase the move: ${ctx.chasing} of ${ctx.n} were at the extreme 15% of the previous 2 hours' range (a long at the top / a short at the bottom); the price had already moved ${ctx.medianRunPct.toFixed(1)}% in the trade's direction (median).`);
   else if (ctx && ctx.n >= 5) findings.push(`Entries are not chasing: only ${ctx.chasing} of ${ctx.n} were in the extreme 15% of the previous 2 hours' range.`);
-  if (slHits.length >= 3 && beyondTpHi > 0) findings.push(`${beyondTpHi} of ${slHits.length} stop-outs went PAST their planned TP distance before the stop hit (${beyondTpLo} even when the entry-minute candle is excluded). A TP at that price should have closed them: the guard re-attaches a missing target every pass and a stop move now carries the TP through - look for tp_lost_after_stop_move / tp_restored / tp_restore_failed events to see which trades ran without one.`);
+  if (measured && beyondTpHi > 0) findings.push(`${beyondTpHi} of ${slHits.length} stop-outs went PAST their planned TP distance at some point (${beyondTpLo} even excluding the entry minute). Careful: the planned TP is the single target recorded at entry - a ladder (partial TPs) puts the real exits elsewhere - and this is the max of the 1m mark series, so it says what PRICE did, not which orders the exchange held. Treat it as a reason to look (/tpsl SYMBOL), not as proof a target was missing.`);
   if (medSl > 0 && medSl < 0.5) findings.push(`Stops are tight: median planned stop is ${medSl.toFixed(2)}% of price, inside normal 1m-5m noise.`);
   if (losses.length && quickLosses / losses.length >= 0.5) findings.push(`${quickLosses} of ${losses.length} losses closed within 5 minutes: entries are being stopped by noise right after opening.`);
   if (lossHold && winHold && winHold < lossHold * 0.5) findings.push(`Winners are held ${winHold.toFixed(0)} min vs losers ${lossHold.toFixed(0)} min: profits are taken fast, losses are allowed to run.`);
@@ -195,7 +205,11 @@ export function summarize(rows, opts = {}) {
     winRate, avgWin, avgLoss, breakEvenWinRate, medianPlannedSlPct: medSl, medianPlannedTpPct: medTp,
     avgWinMovePct: avgWinMove, avgLossMovePct: avgLossMove, avgHoldWinMin: winHold, avgHoldLossMin: lossHold,
     breakEvenWinRatePriceFee: beFee, winRateCI: ci, avgNotionalWin: notW, avgNotionalLoss: notL, leverages,
-    stopOuts: { n: slHits.length, reachedHalfTarget: reachedHalf, neverWorked, medianBestMovePct: medMfeSl, beyondTpHi, beyondTpLo, armedButLost: armed, neverArmed: notArmed, bestMoveBuckets },
+    stopOuts: {
+      n: slHits.length, total: stopOuts.length, measured,
+      reachedHalfTarget: reachedHalf, neverWorked, medianBestMovePct: medMfeSl,
+      beyondTpHi, beyondTpLo, armedButLost: armed, neverArmed: notArmed, bestMoveBuckets,
+    },
     longs, shorts: t.length - longs, entryContext: ctx,
     reasons, findings,
   };
