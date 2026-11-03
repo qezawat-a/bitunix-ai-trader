@@ -27,21 +27,74 @@ export class TelegramBot {
     // unmanaged live positions.
     this.degraded = false;
     this.degradedReason = null;
+    this.recovering = false;       // true while a transient outage is being retried in the background
+    this.retryBaseMs = 5_000;      // first retry delay; doubles up to retryMaxMs
+    this.retryMaxMs = 5 * 60_000;
     this._lastDegradedWarn = 0;
   }
 
+  /**
+   * A rejected token (401/403/404) will never fix itself. Everything else -
+   * 5xx like "Bad Gateway", 429, DNS, timeouts - is the network or Telegram's
+   * side and passes on its own.
+   */
+  static isPermanent(e) {
+    return e?.code === 401 || e?.code === 403 || e?.code === 404
+      || /Unauthorized|bot was blocked|bot is deactivated|Not Found/i.test(e?.message || '');
+  }
+
   /** Record that Telegram is unreachable, and stop hammering the API. */
-  _degrade(reason) {
+  _degrade(reason, { transient = false } = {}) {
     if (!this.degraded) {
       this.degraded = true;
       this.degradedReason = reason;
       this.running = false;
-      log.error(
-        `telegram unavailable (${reason}) — continuing WITHOUT Telegram. `
-        + `Trading, scanning and position management stay ON, but reports and `
-        + `/commands are unavailable until TELEGRAM_BOT_TOKEN is fixed.`,
-      );
+      log.error(transient
+        ? `telegram unreachable (${reason}) — continuing WITHOUT Telegram and retrying in the background. `
+          + `Trading, scanning and position management stay ON. This is not a token problem.`
+        : `telegram unavailable (${reason}) — continuing WITHOUT Telegram. `
+          + `Trading, scanning and position management stay ON, but reports and `
+          + `/commands are unavailable until TELEGRAM_BOT_TOKEN is fixed.`);
     }
+  }
+
+  async _connect() {
+    this.me = await this.call('getMe');
+    log.info(`connected as @${this.me.username}`);
+    await this.setCommands();
+    this.running = true;
+    this._poll();
+  }
+
+  /** Keep trying after a transient outage; come back to life without a restart. */
+  async _recover() {
+    if (this.recovering) return;
+    this.recovering = true;
+    let wait = this.retryBaseMs;
+    while (this.degraded) {
+      await new Promise((r) => setTimeout(r, wait));
+      wait = Math.min(wait * 2, this.retryMaxMs);
+      try {
+        await this._connect();
+        this.degraded = false;
+        this.degradedReason = null;
+        this.recovering = false;
+        log.info('telegram recovered — reports and /commands are back');
+        for (const id of config.telegram.allowed || []) {
+          await this.sendMessage(id, 'Telegram is back\\. Reports and commands work again\\.', {}).catch(() => {});
+        }
+        return;
+      } catch (e) {
+        if (TelegramBot.isPermanent(e)) {
+          this.recovering = false;
+          this._degradedPermanent = true;
+          log.error(`telegram: ${e.message} — the token is being rejected, giving up. Fix TELEGRAM_BOT_TOKEN.`);
+          return;
+        }
+        log.warn(`telegram still unreachable (${e.message}); next try in ${Math.round(wait / 1000)}s`);
+      }
+    }
+    this.recovering = false;
   }
 
   async call(method, payload = {}) {
@@ -169,15 +222,13 @@ export class TelegramBot {
 
   async start() {
     try {
-      this.me = await this.call('getMe');
-      log.info(`connected as @${this.me.username}`);
-      await this.setCommands();
-      this.running = true;
-      this._poll();
+      await this._connect();
     } catch (e) {
-      // A bad token is a config error, not a reason to abandon live positions.
-      // Degrade: the caller decides whether to keep going; nothing throws.
-      this._degrade(e.message);
+      // A bad token is a config error, not a reason to abandon live positions;
+      // a 502 or a timeout is not a config error at all, so it is retried.
+      const transient = !TelegramBot.isPermanent(e);
+      this._degrade(e.message, { transient });
+      if (transient) this._recover();
       return null;
     }
     return this.me;

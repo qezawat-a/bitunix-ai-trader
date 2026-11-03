@@ -82,7 +82,9 @@ async function main() {
   // No bot, no chat ids, or a degraded bot — there is nobody to tell. Say it in
   // the log instead of crashing on me.username.
   if (bot.degraded) {
-    log.error('running headless — Telegram is down, so no reports and no /commands. Fix TELEGRAM_BOT_TOKEN to restore control.');
+    log.error(bot.recovering
+      ? 'running headless for now — Telegram is unreachable and is being retried in the background; trading continues and control returns by itself.'
+      : 'running headless — Telegram is down, so no reports and no /commands. Fix TELEGRAM_BOT_TOKEN to restore control.');
   } else if (!chatIds.length) {
     log.warn('no allowed chat ids — startup notice not sent');
   } else {
