@@ -7,7 +7,7 @@ import { inferCloseReason } from './close-reason.js';
 import { trailingStop, breakevenStop, computeDynamicTpSl, stopAtrFor } from './risk.js';
 import {
   trailingStep, resetTrailing, trailingSnapshot, evaluateAccountTpSl, closeEverything,
-  mostProtectiveStopRow,
+  mostProtectiveStopRow, missingTakeProfit, parseLadder,
 } from './tpsl.js';
 import { upsertPositionTpSl, closePosition, forgetStop } from './executor.js';
 import { getCandles } from '../scanner/scanner.js';
@@ -268,7 +268,14 @@ export async function manageOpenPositions({ notify = null } = {}) {
       // normalise the same way executor.upsertPositionTpSl does so the !length
       // check below tests the actual row count, not an undefined .length on the
       // wrapper object.
-      tpsl = (Array.isArray(raw) ? raw : (raw?.orderList || []));
+      const all = (Array.isArray(raw) ? raw : (raw?.orderList || []));
+      // ANOTHER position's bracket on the same symbol is not this position's.
+      // Keeping it made two things wrong at once: the rescue below saw "rows
+      // exist" and left this position with no stop of its own, and the ratchet
+      // ranked the rival stop as the one to beat — so a winner that reached
+      // breakeven never had its stop moved. Rows with no positionId are kept:
+      // the entry order's attached tp/sl arrives unbound.
+      tpsl = all.filter((r) => r && (r.positionId == null || String(r.positionId) === pid));
     } catch (e) {
       log.warn(`${p.symbol}: cannot read TP/SL (${e.message}) — leaving the existing one alone`);
       tpsl = null;
@@ -317,6 +324,39 @@ export async function manageOpenPositions({ notify = null } = {}) {
       // died". Fall through instead: the ratchet below only writes again when
       // the protection level is an improvement, so a fresh bracket plus a
       // breakeven/trailing move in the SAME pass is always at worst neutral.
+    }
+
+    // 1b) a live stop with NO take-profit ----------------------------------
+    // A target can go missing: a stop move that did not carry it, an exchange
+    // cancel, a cleared order. The position then never closes at its target —
+    // price runs THROUGH the planned TP, reverses, and the stop books a winner
+    // as a loss, which is the "13 of 14 stop-outs went past their planned TP"
+    // pattern in the autopsy. The rescue above only covers a position with no
+    // rows at all, so put the target the trade was opened with back on.
+    {
+      // `tpsl` is already this position's rows, or null when the read failed.
+      // An unreadable book is not evidence that the target is missing, and
+      // acting on it would stack a second TP on a position that still has one.
+      const ladder = String(s.tpsl_method || 'POSITION').toUpperCase() === 'PARTIAL'
+        ? (() => { try { return parseLadder(s.partial_tp_ladder); } catch { return []; } })()
+        : [];
+      const plannedTp = tpsl?.length ? missingTakeProfit({ rows: tpsl, record, ladder }) : null;
+      if (plannedTp != null) {
+        const r = await upsertPositionTpSl({
+          symbol: p.symbol, positionId: pid, tpPrice: plannedTp,
+          side: p.side, entry: Number(p.avgOpenPrice) || price,
+        });
+        actions.push({ type: 'tp_reattached', symbol: p.symbol, tp: plannedTp, ok: r.ok, reason: r.reason ?? null });
+        await logEvent('tp_reattached', {
+          symbol: p.symbol, side: p.side, positionId: pid, tpPrice: plannedTp, ok: r.ok, reason: r.reason ?? null,
+        }, p.symbol);
+        if (r.ok) {
+          // Keep this pass's view honest: the ratchet below and the TP it
+          // carries must see the target that now exists on the exchange.
+          tpsl = [...(tpsl || []), { positionId: pid, tpPrice: plannedTp }];
+          if (notify) await notify(`🎯 *Take-profit restored* — ${p.symbol} ${p.side}\nTP ${plannedTp.toPrecision(8)} (it was missing on the exchange)`);
+        }
+      }
     }
 
     // 2) breakeven + trailing
@@ -412,7 +452,8 @@ export async function manageOpenPositions({ notify = null } = {}) {
         if (improved) {
           // preserve the existing take-profit, but read it off the
           // whole-position row rather than whatever row happened to be first
-          const tpRow = (tpsl || []).find((r) => r && r.tpPrice != null) || null;
+          // ("0" is the exchange's "no target", not a price).
+          const tpRow = (tpsl || []).find((r) => r && Number(r.tpPrice) > 0) || null;
           const existingTp = tpRow ? Number(tpRow.tpPrice) : null;
           const r = await upsertPositionTpSl({
             symbol: p.symbol, positionId: pid, slPrice: trail.stop, tpPrice: existingTp,

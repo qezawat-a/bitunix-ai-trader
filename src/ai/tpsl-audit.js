@@ -11,14 +11,36 @@ import { parseLadder } from '../settings-schema.js';
  * several R levels round to the SAME price and the exchange shows one merged or
  * one missing row. expected[] makes that visible rung by rung.
  */
-export function auditTpSl({ side, qty, entry, slDist, steps, rows, round }) {
+export function auditTpSl({ side, qty, entry, slDist, steps, rows, round, minQty = 0 }) {
   const dir = side === 'LONG' ? 1 : -1;
-  const expected = steps.map((st) => ({
+  // Same rule as applyPartialTpSl: a rung below the exchange's minimum order
+  // size cannot exist, so it is MERGED into the next one. Without this the
+  // audit reported rungs as "missing from the exchange" that the bot could
+  // never have placed, hiding the real reason (the position is too small to
+  // split) behind a red herring.
+  const merged = [];
+  let carry = null;
+  for (const st of steps) {
+    const share = st.share + (carry?.share || 0);
+    const rungQty = (Number(qty) * share) / 100;
+    if (minQty > 0 && Number(rungQty) < Number(minQty)) { carry = { share, r: st.r }; continue; }
+    merged.push({ share, r: st.r, qty: rungQty });
+    carry = null;
+  }
+  // Nothing could be split at all: the bot then leaves ONE whole-position target
+  // at the outermost rung instead of nothing, so that is the expectation here.
+  if (carry) merged.push({ share: carry.share, r: carry.r, qty: (Number(qty) * carry.share) / 100 });
+  const expected = merged.map((st) => ({
     share: st.share, r: st.r,
     price: round(Number(entry) + dir * slDist * st.r),
     qty: (Number(qty) * st.share) / 100,
   }));
   const flags = [];
+  if (carry) {
+    flags.push(`${carry.share}% of the position has no rung at all: every step is below the exchange minimum (${minQty}), so the whole position can only hold ONE target — at the outermost rung (${carry.r}R). A 3-4 rung ladder needs a bigger position.`);
+  } else if (merged.length < steps.length) {
+    flags.push(`${steps.length} ladder steps were reduced to ${merged.length} placeable rungs (the smaller ones are below the exchange minimum of ${minQty} and are merged into the next rung).`);
+  }
 
   const prices = expected.map((x) => x.price);
   const dupPrices = prices.filter((p, i) => prices.indexOf(p) !== i);
@@ -63,7 +85,7 @@ export async function auditSymbol(symbol) {
   const info = await bitunix.pairInfo(sym);
   const prec = Number(info?.quotePrecision ?? 8);
   const round = (p) => Number(Number(p).toFixed(prec));
-  const audit = slDist ? auditTpSl({ side: pos.side, qty: Number(pos.qty), entry, slDist, steps, rows, round }) : { expected: [], flags: ['No open trade row with a planned stop was found, so the ladder cannot be reconstructed.'] };
+  const audit = slDist ? auditTpSl({ side: pos.side, qty: Number(pos.qty), entry, slDist, steps, rows, round, minQty: Number(info?.minTradeVolume ?? 0) }) : { expected: [], flags: ['No open trade row with a planned stop was found, so the ladder cannot be reconstructed.'] };
   return {
     symbol: sym, open: true, side: pos.side, qty: Number(pos.qty), entry, plannedStopDistPct: slDist ? (slDist / entry) * 100 : null,
     priceTick: Math.pow(10, -prec), tickPctOfPrice: (Math.pow(10, -prec) / entry) * 100,

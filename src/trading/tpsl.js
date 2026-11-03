@@ -58,7 +58,11 @@ const log = createLogger('tpsl');
  * Returns null when no row carries a stop.
  */
 export function mostProtectiveStopRow(rows, side) {
-  const withStop = (rows || []).filter((r) => r && r.slPrice != null);
+  // "0" is what the exchange sends for the side a row does not carry: a row
+  // with slPrice 0 has NO stop, and ranking it as one (it is the lowest possible
+  // price) made every SHORT look like it was already protected at zero.
+  const priced = (r) => r && Number(r.slPrice) > 0;
+  const withStop = (rows || []).filter(priced);
   if (!withStop.length) return null;
   const isLong = side === 'LONG';
   return withStop.reduce((best, r) => {
@@ -69,6 +73,43 @@ export function mostProtectiveStopRow(rows, side) {
     if (!Number.isFinite(c)) return best;
     return (isLong ? c > b : c < b) ? r : best;
   }, null);
+}
+
+/**
+ * The take-profit a live position SHOULD have but does not.
+ *
+ * Rows that carry a stop but no target leave the position unprotected on the
+ * profit side: price runs past the planned TP, comes back, and the stop books
+ * a winner as a loss (autopsy: 13 of 14 stop-outs went past their planned TP
+ * before the stop hit). The target is the one the trade was opened with, read
+ * off its trade record — re-deriving it from today's ATR would move the
+ * goalposts on a trade that is already running.
+ *
+ * With tpsl_method=PARTIAL there is often no single planned target: the rungs
+ * ARE the plan, and a rung the exchange would not accept (below its minimum
+ * order size) leaves the trade with nothing. For those the shape of the plan is
+ * still known — entry, the stop distance and the ladder — so the OUTERMOST rung
+ * is returned as the one whole-position target to fall back to.
+ *
+ * Returns the price to re-attach, or null when there is nothing to restore:
+ * a row already carries a target, the record is unavailable, or the trade was
+ * opened without a plan (no target and no ladder).
+ */
+export function missingTakeProfit({ rows, record, ladder = [] }) {
+  const hasTp = (rows || []).some((r) => r && Number(r.tpPrice) > 0);
+  if (hasTp) return null;
+  const planned = Number(record?.tp_price);
+  if (Number.isFinite(planned) && planned > 0) return planned;
+
+  const entry = Number(record?.entry_price);
+  const sl = Number(record?.sl_price);
+  const side = record?.side;
+  const steps = Array.isArray(ladder) ? ladder : [];
+  const outerR = steps.reduce((m, x) => Math.max(m, Number(x?.r) || 0), 0);
+  if (!(entry > 0) || !(sl > 0) || !(outerR > 0) || !(side === 'LONG' || side === 'SHORT')) return null;
+  const dist = Math.abs(entry - sl);
+  if (!(dist > 0)) return null;
+  return side === 'LONG' ? entry + dist * outerR : entry - dist * outerR;
 }
 
 // ---------------------------------------------------------------------------
@@ -108,34 +149,52 @@ export async function applyPositionTpSl({ symbol, positionId, tpPrice, slPrice, 
  * Each rung is a native tpsl/place_order carrying tpQty, so it closes only its
  * share. The stop stays whole-position: scaling out of a winner is good, but
  * scaling out of a loser just means being wrong more slowly.
+ *
+ * THE FAILURE THIS FIXES: a rung smaller than the exchange's minimum order size
+ * cannot exist as its own order, and it used to be dropped with only a log line.
+ * A ~10 USDT position split four ways is a few USDT per rung, so on small
+ * accounts EVERY rung was skipped — the trade then had no take-profit at all,
+ * price ran past every planned target and died on the stop (autopsy: 13 of 14
+ * stop-outs went past their planned TP). A too-small rung is now MERGED into the
+ * next one (fewer prices, same shares), and when the position is too small to be
+ * split at all, `fallbackTp` carries the outermost rung so the caller can leave
+ * ONE whole-position target instead of nothing.
  */
 export async function applyPartialTpSl({
   symbol, positionId, side, entry, qty, slDist, ladder, liqPrice = null,
 }) {
   const steps = typeof ladder === 'string' ? parseLadder(ladder) : (ladder || []);
   if (!steps.length) return { ok: false, reason: 'empty ladder' };
+  const dist = Number(slDist);
+  if (!(dist > 0)) return { ok: false, reason: 'no stop distance to size the rungs from' };
 
   const isLong = side === 'LONG';
   const info = await bitunix.pairInfo(symbol);
   const minQty = Number(info?.minTradeVolume ?? 0);
+  const priceAt = (r) => (isLong ? Number(entry) + dist * r : Number(entry) - dist * r);
 
   const placed = [];
   const skipped = [];
   let allocated = 0;
+  let carry = null;   // shares rolled forward from a rung that could not be placed
 
   for (const step of steps) {
-    const target = isLong ? Number(entry) + slDist * step.r : Number(entry) - slDist * step.r;
-    const stepQty = await bitunix.roundQty(symbol, (Number(qty) * step.share) / 100);
-
-    if (minQty && Number(stepQty) < minQty) {
-      skipped.push({ ...step, reason: `qty ${stepQty} below minTradeVolume ${minQty}` });
+    const share = step.share + (carry?.share || 0);
+    const r = step.r;
+    const stepQty = await bitunix.roundQty(symbol, (Number(qty) * share) / 100);
+    const tooSmall = minQty > 0 && Number(stepQty) < minQty;
+    if (tooSmall || allocated + Number(stepQty) > Number(qty)) {
+      skipped.push({
+        share, r,
+        reason: tooSmall
+          ? `qty ${stepQty} below minTradeVolume ${minQty} — merged into the next rung`
+          : 'would over-allocate the position — merged into the next rung',
+      });
+      carry = { share, r };
       continue;
     }
-    if (allocated + Number(stepQty) > Number(qty)) {
-      skipped.push({ ...step, reason: 'would over-allocate the position' });
-      continue;
-    }
 
+    const target = priceAt(r);
     try {
       const res = await bitunix.placeTpSlOrder({
         symbol,
@@ -146,19 +205,24 @@ export async function applyPartialTpSl({
         tpQty: String(stepQty),
       });
       allocated += Number(stepQty);
-      placed.push({ ...step, qty: stepQty, price: target, orderId: res?.orderId });
+      placed.push({ share, r, qty: stepQty, price: target, orderId: res?.orderId });
+      carry = null;
     } catch (e) {
-      skipped.push({ ...step, reason: e.message });
+      skipped.push({ share, r, reason: e.message });
+      carry = { share, r };
     }
   }
 
   const runner = Number(qty) - allocated;
+  const outer = steps.reduce((m, x) => Math.max(m, Number(x.r) || 0), 0);
   return {
     ok: placed.length > 0,
     method: 'PARTIAL',
     placed,
     skipped,
     runnerQty: runner > 0 ? runner : 0,
+    // The target a caller should fall back to when no rung could be placed.
+    fallbackTp: outer > 0 ? priceAt(outer) : null,
     liqPrice,
   };
 }

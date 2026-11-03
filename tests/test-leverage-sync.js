@@ -81,6 +81,13 @@ const mkSignal = (threeMinAtr) => ({
 
 let calls = [];
 
+/**
+ * Margin actually put on one trade: available 10 USDT x margin_pct 5%, times
+ * the 0.8 fee buffer computeMargin() keeps for exchange fees / margin
+ * requirements (commit e0df525: using the full balance produced Bitunix 20003).
+ */
+const TRADE_MARGIN = 10 * 0.05 * 0.8;
+
 function install({ heldLev = 50, changeRefuses = false } = {}) {
   resetSymbolConfigCache();
   calls = [];
@@ -148,7 +155,7 @@ assert(kept.leverage === 50, `leverage stays at the configured 50x (got ${kept.l
 assert(kept.leverageAdjusted === false, 'no adjustment was announced');
 assert(!calls.some((c) => c[0] === 'changeLev'), 'change_leverage was never called');
 const keptOrder = calls.find((c) => c[0] === 'placeOrder');
-assert(close(Number(keptOrder[1]), 0.5 * 50 / 0.003319, 1e-2), `qty sized at 50x (got ${keptOrder[1]})`);
+assert(close(Number(keptOrder[1]), TRADE_MARGIN * 50 / 0.003319, 1e-2), `qty sized at 50x (got ${keptOrder[1]})`);
 const liq50 = 0.003319 * (1 - 1 / 50 + 0.005);
 assert(Number(keptOrder[2]) > liq50, `the stop sits inside liquidation (sl ${keptOrder[2]} > liq ${liq50.toFixed(8)})`);
 
@@ -184,7 +191,7 @@ await setSetting('leverage', 50, 'test');
 install({ heldLev: 20, changeRefuses: true });
 const refusedLev = await openFromSignal(mkSignal(0.000006));
 const refusedOrder = calls.find((c) => c[0] === 'placeOrder');
-assert(refusedLev.ok === false || (refusedOrder && close(Number(refusedOrder[1]), 0.5 * refusedLev.leverage / 0.003319, 1e-2)),
+assert(refusedLev.ok === false || (refusedOrder && close(Number(refusedOrder[1]), TRADE_MARGIN * refusedLev.leverage / 0.003319, 1e-2)),
   'never sized at a leverage the exchange does not hold');
 
 console.log('\nminimum order cannot be opened at the configured leverage -> refused, leverage is not raised');

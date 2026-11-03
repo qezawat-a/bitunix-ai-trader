@@ -10,6 +10,20 @@ import {
 const log = createLogger('executor');
 
 /**
+ * A price the exchange will actually accept.
+ *
+ * Bitunix zero-fills the fields an order does not carry ("tpPrice":"0",
+ * "slQty":"0"). A zero is not a neutral value here: sent back in a modify it
+ * reads as "remove this side", and a row whose slPrice is "0" is not a stop at
+ * price zero. Every read/write in this module therefore goes through this
+ * filter, so an unset field can never be mistaken for a real level.
+ */
+const livePrice = (v) => {
+  const n = Number(v);
+  return v == null || v === '' || !Number.isFinite(n) || n <= 0 ? null : n;
+};
+
+/**
  * LIVE order execution on Bitunix futures.
  * There is no dry-run path in this module — every call hits the real exchange.
  */
@@ -478,6 +492,21 @@ export async function openFromSignal(signal, { aiVerdict = null, marginOverride 
       }
       for (const sk of ladder.skipped || []) log.warn(`${symbol} ladder ${sk.share}%@${sk.r}R skipped: ${sk.reason}`);
       await logEvent('partial_ladder', { symbol, placed: ladder.placed, skipped: ladder.skipped }, symbol);
+
+      // A ladder that could not be split at all (position below the exchange's
+      // minimum order size) would otherwise leave the trade with NO target: the
+      // entry order only carries one when tp_mode gave it a fixed TP. Leave a
+      // single whole-position target at the outermost rung instead of nothing.
+      if (!ladder.ok && tpPrice == null && ladder.fallbackTp != null) {
+        const fb = await upsertPositionTpSl({
+          symbol, positionId, tpPrice: ladder.fallbackTp, side: signal.side, entry: price,
+        });
+        log.warn(`${symbol}: ladder too small to split — single target ${ladder.fallbackTp} `
+          + `(${fb.ok ? 'placed' : fb.reason})`);
+        await logEvent('partial_ladder_fallback', {
+          symbol, side: signal.side, tpPrice: ladder.fallbackTp, ok: fb.ok, reason: fb.reason ?? null,
+        }, symbol);
+      }
     } catch (e) {
       log.warn(`${symbol} partial ladder failed: ${e.message}`);
     }
@@ -579,18 +608,19 @@ export async function readPositionTpSl({ symbol, positionId, side = null }) {
     (r) => r && (positionId == null || String(r.positionId) === String(positionId)),
   );
   const pool = forPos.length ? forPos : list;
-  const withStop = pool.filter((r) => r && r.slPrice != null);
+  // Rows carry "0" for the side they do not use: those are not stops.
+  const withStop = pool.filter((r) => r && livePrice(r.slPrice) != null);
   // With several rows (order-attached SL + position SL + rungs) the stop that
   // actually protects is the MOST protective one, not whichever came first.
   // Without a side we cannot rank them, so fall back to the whole-position row.
   const row = side
     ? mostProtectiveStopRow(withStop, side)
-    : (withStop.find((r) => r.tpQty == null && r.slQty == null) || withStop[0] || null);
+    : (withStop.find((r) => livePrice(r.tpQty) == null && livePrice(r.slQty) == null) || withStop[0] || null);
   if (!row) return null;
 
   return {
-    slPrice: Number(row.slPrice),
-    tpPrice: row.tpPrice != null ? Number(row.tpPrice) : null,
+    slPrice: livePrice(row.slPrice),
+    tpPrice: livePrice(row.tpPrice),
     row,
   };
 }
@@ -625,6 +655,12 @@ async function verifyStopApplied({ symbol, positionId, side, want, delays = [400
 }
 
 export async function upsertPositionTpSl({ symbol, positionId, tpPrice, slPrice, side = null, entry = null }) {
+  // Only real prices are written. A "0" arriving from a caller (or from a
+  // row it copied a value out of) must not become a modify that deletes the
+  // target, and a "0" stop is not a stop.
+  tpPrice = livePrice(tpPrice);
+  slPrice = livePrice(slPrice);
+
   // ---- ratchet guard --------------------------------------------------
   if (slPrice != null && side) {
     const key = String(positionId);
@@ -651,10 +687,76 @@ export async function upsertPositionTpSl({ symbol, positionId, tpPrice, slPrice,
   // instead of writing a memory.
   const noted = (mode, res) => {
     if (slPrice != null && side) bestStop.set(String(positionId), { side, stop: Number(body.slPrice) });
-    return { ok: true, res, mode, slPrice: Number(body.slPrice), tpPrice: body.tpPrice ? Number(body.tpPrice) : null };
+    const out = { ok: true, res, mode, slPrice: Number(body.slPrice), tpPrice: livePrice(body.tpPrice) };
+    if (tpRestore) out.tpRestored = !!tpRestore.ok;
+    return out;
   };
 
   const wanted = slPrice != null ? Number(body.slPrice) : null;
+
+  // Read what the position actually holds, with the unset ("0") fields filtered
+  // out. Returns null when the exchange cannot be asked, so a failed read is
+  // never mistaken for "there is no target".
+  const readTaken = async () => {
+    try {
+      const after = await bitunix.getPendingTpSlOrders({ symbol, positionId });
+      const all = (Array.isArray(after) ? after : (after?.orderList || [])).filter(Boolean);
+      const own = all.filter((r) => String(r.positionId) === String(positionId));
+      // The entry order's attached bracket can come back unbound (no
+      // positionId): reading only bound rows there says "this position has no
+      // target" when it plainly does, and would re-place a duplicate.
+      const list = own.length ? own : all;
+      return { list, tp: list.reduce((best, r) => best ?? livePrice(r.tpPrice), null) };
+    } catch { return null; }
+  };
+
+  /**
+   * Wait for a write to show up in the pending view.
+   *
+   * The book lags a write by up to a couple of seconds on Bitunix (the same lag
+   * verifyStopApplied works around). A single immediate read would call a good
+   * restore failed and then stack a second target on top of it.
+   */
+  const confirmTp = async (tries = 4, delayMs = 400) => {
+    let seen = await readTaken();
+    for (let i = 1; i < tries && seen && seen.tp == null && seen.list.length; i++) {
+      await new Promise((r) => setTimeout(r, delayMs));
+      seen = await readTaken();
+    }
+    return seen;
+  };
+
+  /**
+   * Put a take-profit back after a stop move dropped it.
+   *
+   * A target-only order first (tpsl/place_order carrying tpQty is how the
+   * partial ladder places its rungs, so it is known to work next to an existing
+   * stop), then the position-level TP.
+   */
+  const restoreTakeProfit = async (tp) => {
+    const attempts = [];
+    const price = await bitunix.roundPrice(symbol, tp);
+    const qty = await positionQtyOf(symbol, positionId);
+    if (qty != null) {
+      try {
+        await bitunix.placeTpSlOrder({
+          symbol, positionId: String(positionId),
+          tpPrice: String(price), tpStopType: 'MARK_PRICE', tpOrderType: 'MARKET', tpQty: String(qty),
+        });
+        attempts.push('tp-only order');
+        const seen = await confirmTp();
+        if (seen?.tp != null) return { ok: true, attempts, tp: seen.tp };
+      } catch (e) { attempts.push(`tp-only order failed: ${e.message}`); }
+    }
+    try {
+      await bitunix.placePositionTpSl({
+        symbol, positionId: String(positionId), tpPrice: String(price), tpStopType: 'MARK_PRICE',
+      });
+      attempts.push('position-level TP');
+    } catch (e) { attempts.push(`position-level TP failed: ${e.message}`); }
+    const verify = await confirmTp();
+    return { ok: verify?.tp != null, attempts, tp: verify?.tp ?? null };
+  };
 
   // Resolve the write, then PROVE it. Recording the stop in bestStop — and
   // letting the caller record it in its own ratchet — off a write that never
@@ -663,21 +765,25 @@ export async function upsertPositionTpSl({ symbol, positionId, tpPrice, slPrice,
   // loosen it, and every later guard pass saw "nothing to improve" and returned
   // an empty action list while the position kept its original wide stop.
   // Does ANY row still carry a take-profit? A stop move that silently drops the
-  // TP would explain trades that run past their target and then get stopped
-  // (autopsy: median best move before the stop > planned TP). Detection only: it
-  // logs and records an event, it never re-places anything by itself.
+  // TP is exactly how trades ran past their target and then got stopped
+  // (autopsy: 13 of 14 stop-outs went past the planned TP before the stop hit).
+  // Detecting that and only writing a log line left the position without a
+  // target for the rest of its life, so the target is put BACK here.
   let tpBefore = null;
+  let tpRestore = null;
   const checkTpKept = async () => {
-    if (tpBefore == null) return;
-    try {
-      const after = await bitunix.getPendingTpSlOrders({ symbol, positionId });
-      const list = (Array.isArray(after) ? after : (after?.orderList || []))
-        .filter((r) => r && String(r.positionId) === String(positionId));
-      if (list.length && !list.some((r) => r.tpPrice != null)) {
-        log.error(`${symbol} ${positionId}: the stop moved but the take-profit ${tpBefore} is GONE from the exchange`);
-        await logEvent('tp_lost_after_stop_move', { symbol, positionId, side, tpBefore, mode: 'stop-move' }, symbol);
-      }
-    } catch { /* detection is best-effort */ }
+    if (tpBefore == null) return null;
+    const after = await readTaken();
+    if (!after || !after.list.length) return null;   // nothing to judge by
+    if (after.tp != null) return null;               // still there: fine
+    log.error(`${symbol} ${positionId}: the stop moved but the take-profit ${tpBefore} is GONE from the exchange — re-placing it`);
+    await logEvent('tp_lost_after_stop_move', { symbol, positionId, side, tpBefore, mode: 'stop-move' }, symbol);
+    tpRestore = await restoreTakeProfit(tpBefore);
+    if (tpRestore.ok) log.warn(`${symbol} ${positionId}: take-profit ${tpRestore.tp} restored (${tpRestore.attempts.join(', ')})`);
+    else log.error(`${symbol} ${positionId}: could NOT restore the take-profit ${tpBefore} (${tpRestore.attempts.join(', ')})`);
+    await logEvent(tpRestore.ok ? 'tp_restored' : 'tp_restore_failed',
+      { symbol, positionId, side, tpPrice: tpBefore, restored: tpRestore.tp, attempts: tpRestore.attempts }, symbol);
+    return tpRestore;
   };
 
   const finish = async (mode, res) => {
@@ -707,7 +813,12 @@ export async function upsertPositionTpSl({ symbol, positionId, tpPrice, slPrice,
     const rows = (Array.isArray(existing) ? existing : (existing?.orderList || []))
       .filter((r) => r && String(r.positionId) === String(positionId));
 
-    tpBefore = rows.map((r) => r.tpPrice).find((v) => v != null) ?? null;
+    tpBefore = rows.reduce((best, r) => best ?? livePrice(r.tpPrice), null);
+    // A stop move (breakeven, trailing, /be, move_sl_to_breakeven) carries only
+    // slPrice. The exchange reads a missing tpPrice as "remove the take-profit",
+    // so a bare stop move would delete the target and the position then runs
+    // PAST it and comes back to the stop. Carry the existing one through.
+    if (body.tpPrice == null && tpBefore != null) body.tpPrice = await bitunix.roundPrice(symbol, tpBefore);
     if (!rows.length) {
       return await finish('placed', await bitunix.placePositionTpSl(body));
     }
@@ -719,20 +830,22 @@ export async function upsertPositionTpSl({ symbol, positionId, tpPrice, slPrice,
     // 2) The entry order carries its SL attached (placeOrder slPrice=...). That
     //    row is an ORDER-level tp/sl with its own id; position/modify_order
     //    answers code 0 for it and changes nothing. Modify it by orderId.
-    const row = rows.find((r) => r.slPrice != null) || rows[0];
+    const row = rows.find((r) => livePrice(r.slPrice) != null) || rows[0];
     const id = row.id ?? row.orderId;
-    const qty = row.slQty ?? row.tpQty ?? await positionQtyOf(symbol, positionId);
+    // A zero-filled qty is not a qty: it would write slQty "0" and be rejected
+    // (or, worse, cover nothing). Fall through to the position's own size.
+    const qty = livePrice(row.slQty) ?? livePrice(row.tpQty) ?? await positionQtyOf(symbol, positionId);
     if (id != null && qty != null) {
       try {
         const mbody = {
           orderId: String(id),
           slPrice: body.slPrice, slStopType: 'MARK_PRICE', slOrderType: 'MARKET', slQty: String(qty),
         };
-        const keepTp = body.tpPrice ?? row.tpPrice;
+        const keepTp = livePrice(body.tpPrice) ?? livePrice(row.tpPrice);
         if (keepTp != null) {
           Object.assign(mbody, {
             tpPrice: String(keepTp), tpStopType: 'MARK_PRICE', tpOrderType: 'MARKET',
-            tpQty: String(row.tpQty ?? qty),
+            tpQty: String(livePrice(row.tpQty) ?? qty),
           });
         }
         const second = await finish('modified-by-orderId', await bitunix.modifyTpSlOrder(mbody));
