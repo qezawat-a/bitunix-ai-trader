@@ -1,6 +1,6 @@
 import { recentLogs } from '../logger.js';
 import { getGuardTrace } from '../trading/trace.js';
-import { settings, recentEvents, recentSignals } from '../db/index.js';
+import { settings, recentEvents, recentSignals, q } from '../db/index.js';
 
 /**
  * "Why did X not happen?" answered from FACTS the process recorded, not from
@@ -106,6 +106,74 @@ export function explainTrailing(trace, s, now = Date.now()) {
   return out;
 }
 
+/**
+ * "Why did THIS closed trade end here?" — from the recorded prices only.
+ *
+ * After a loss the question is almost never "what did the market do", it is
+ * "why did it close at -0.08% when the stop was recorded at -0.71%". That is
+ * answerable from the trade row itself: the realised move against the stop and
+ * the target the trade was opened with. `events` (audit rows around the same
+ * symbol) are handed back alongside, because the answer "something else closed
+ * it" needs them to name what.
+ */
+export function explainClosedTrade({ trade, events = [] } = {}) {
+  if (!trade) return null;
+  const entry = Number(trade.entry_price), exit = Number(trade.exit_price);
+  const sl = Number(trade.sl_price), tp = Number(trade.tp_price);
+  const isShort = String(trade.side || '').toUpperCase() === 'SHORT';
+  const dir = isShort ? -1 : 1;
+  const facts = {
+    symbol: trade.symbol, side: isShort ? 'SHORT' : 'LONG',
+    entry, exit, sl, tp, closedAt: trade.closed_at, closeReason: trade.close_reason || null,
+    holdMin: trade.opened_at && trade.closed_at
+      ? Math.round((new Date(trade.closed_at) - new Date(trade.opened_at)) / 60000) : null,
+    pnl: Number(trade.realized_pnl),
+  };
+  if (!(entry > 0) || !Number.isFinite(exit)) {
+    return { ...facts, category: 'unknown', verdict: 'The row has no usable entry/exit price.', reasons: [] };
+  }
+  const move = ((exit - entry) / entry) * 100 * dir;      // + in profit, - in loss
+  const slPct = sl > 0 ? (Math.abs(sl - entry) / entry) * 100 : null;
+  const tpPct = tp > 0 ? (Math.abs(tp - entry) / entry) * 100 : null;
+  const out = {
+    ...facts, movePct: move, slPct, tpPct,
+    events: events.slice(0, 10).map((e) => ({ kind: e.kind, at: e.created_at, payload: e.payload })),
+  };
+
+  if (move > 0) {
+    if (tpPct != null && move >= tpPct * 0.85) {
+      return { ...out, category: 'expected_behavior', verdict: `Closed AT the target: +${move.toFixed(2)}% against a planned TP of ${tpPct.toFixed(2)}%.`, reasons: [] };
+    }
+    return {
+      ...out, category: 'expected_behavior',
+      verdict: `Closed in profit at +${move.toFixed(2)}%, well before the ${tpPct == null ? 'planned target' : tpPct.toFixed(2) + '% target'}: something took the profit early (trailing stop, breakeven floor, or a manual/agent close).`,
+      reasons: ['Check the events below for a stop move right before the close, or a close_* event.'],
+    };
+  }
+  if (slPct == null) {
+    return { ...out, category: 'unknown', verdict: `Closed at ${move.toFixed(2)}% but the row has no planned stop to compare with.`, reasons: ['The trade was opened without a recorded stop, or the record is incomplete.'] };
+  }
+  const adverse = -move;
+  if (adverse >= slPct * 0.85 && adverse <= slPct * 1.15) {
+    return { ...out, category: 'expected_behavior', verdict: `Closed AT its plan: -${adverse.toFixed(2)}% against a planned stop of -${slPct.toFixed(2)}%. The exit did what it was told.`, reasons: [] };
+  }
+  if (adverse < slPct * 0.85) {
+    return {
+      ...out, category: 'possible_code_bug',
+      verdict: `Closed at -${adverse.toFixed(2)}%, only ${((adverse / slPct) * 100).toFixed(0)}% of the way to the planned stop (-${slPct.toFixed(2)}%): the stop did not close this trade.`,
+      reasons: [
+        'Something else closed it: a software stop (see stop_move_failed / tpsl_write_unverified), an agent/manual close, an account-level TP/SL flatten, or the exchange held a stop tighter than the one recorded here.',
+        'The events below are the evidence: look for account_tpsl, position_closed, stop_move_failed, tpsl_write_unverified or a partial-ladder row in the minutes before the close.',
+      ],
+    };
+  }
+  return {
+    ...out, category: 'exchange',
+    verdict: `Closed at -${adverse.toFixed(2)}%, BEYOND the planned stop of -${slPct.toFixed(2)}%: the stop fired late or the trigger slipped (mark price crossed while the last price did not, or a thin book).`,
+    reasons: ['Compare the exchange position history row with the pending TP/SL at the time: the stop price that fired is not the one that was written down.'],
+  };
+}
+
 export async function diagnose({ symbol = null, topic = 'trailing' } = {}) {
   const s = settings();
   const sym = symbol ? String(symbol).toUpperCase() : null;
@@ -132,6 +200,21 @@ export async function diagnose({ symbol = null, topic = 'trailing' } = {}) {
     try { signals = (await recentSignals(8)).filter((x) => !sym || x.symbol === sym); } catch { /* ignore */ }
   }
 
+  // "No open position has been evaluated by the guard" is the answer a user gets
+  // AFTER the loss - the position is already closed, so there is no trace to
+  // explain. Fall back to the last CLOSED trade on that symbol and answer the
+  // question that was actually asked: why did it end there?
+  let lastClosedTrade = null;
+  if (sym && verdicts.length === 0) {
+    try {
+      const { rows } = await q(
+        `SELECT symbol, side, entry_price, exit_price, sl_price, tp_price, realized_pnl,
+                close_reason, opened_at, closed_at
+           FROM trades WHERE symbol=$1 AND status='CLOSED' ORDER BY closed_at DESC LIMIT 1`, [sym]);
+      lastClosedTrade = explainClosedTrade({ trade: rows[0] || null, events });
+    } catch { /* DB offline: nothing to add */ }
+  }
+
   const logs = recentLogs({ level: 'warn', grep: sym, limit: 25 })
     .concat(recentLogs({ level: 'error', limit: 15 }))
     .slice(-30);
@@ -147,6 +230,7 @@ export async function diagnose({ symbol = null, topic = 'trailing' } = {}) {
     },
     positions: verdicts,
     noPositionsTraced: verdicts.length === 0,
+    lastClosedTrade,
     recentFailureEvents: events,
     recentSignals: signals,
     recentWarnErrorLogs: logs,

@@ -178,6 +178,31 @@ export function summarize(rows, opts = {}) {
   const beyondTpHi = slHits.filter((x) => Number.isFinite(x.tpPct) && x.mfe >= x.tpPct).length;
   const beyondTpLo = slHits.filter((x) => Number.isFinite(x.tpPct) && Number.isFinite(x.mfeLo) && x.mfeLo >= x.tpPct).length;
 
+  /**
+   * Where did the LOSING trades actually close, compared with their OWN planned
+   * stop? No candles needed — entry, exit and the stop recorded when the trade
+   * opened are all in the row.
+   *
+   * This is the question that matters after a loss ("why -0.08% when the stop
+   * was -0.71%?"): an exit at the stop means the plan worked, an exit far
+   * SHALLOWER means something other than the stop closed it (or the exchange
+   * held a tighter stop than the one written down), and an exit far BEYOND it
+   * means the stop fired late or slipped through the trigger.
+   */
+  const losing = t.filter((x) => x.pnl <= 0 && Number.isFinite(x.slPct) && x.slPct > 0 && Number.isFinite(x.movePct));
+  const adverseOf = (x) => -x.movePct;            // movePct is direction-aware, so a loss is negative
+  const atStop = losing.filter((x) => adverseOf(x) >= x.slPct * 0.85 && adverseOf(x) <= x.slPct * 1.15);
+  const shortOfStop = losing.filter((x) => adverseOf(x) < x.slPct * 0.85);
+  const beyondStop = losing.filter((x) => adverseOf(x) > x.slPct * 1.15);
+  const exitVsStop = {
+    n: losing.length,
+    atStop: atStop.length, shortOfStop: shortOfStop.length, beyondStop: beyondStop.length,
+    medianShortPct: median(shortOfStop.map(adverseOf)),
+    medianShortStopPct: median(shortOfStop.map((x) => x.slPct)),
+    medianBeyondPct: median(beyondStop.map(adverseOf)),
+    medianBeyondStopPct: median(beyondStop.map((x) => x.slPct)),
+  };
+
   const findings = [];
   if (t.length < 20) findings.push(`Only ${t.length} closed trades: treat every conclusion below as a lead, not proof.`);
   if (Number.isFinite(beFee)) findings.push(`In price terms (avg win ${(wMove + feePct).toFixed(2)}% / avg loss ${(lMove - feePct).toFixed(2)}%, minus ~${feePct}% round-trip fees) break-even needs a ${(beFee * 100).toFixed(0)}% win rate. Actual ${(winRate * 100).toFixed(0)}% (95% range ${(ci[0] * 100).toFixed(0)}-${(ci[1] * 100).toFixed(0)}%)${ci[1] < beFee ? ': clearly below break-even.' : ci[0] > beFee ? ': above break-even.' : ': break-even is inside that range, too few trades to call it.'}`);
@@ -196,6 +221,17 @@ export function summarize(rows, opts = {}) {
   if (measured && beyondTpHi > 0) findings.push(`${beyondTpHi} of ${slHits.length} stop-outs went PAST their planned TP distance at some point (${beyondTpLo} even excluding the entry minute). Careful: the planned TP is the single target recorded at entry - a ladder (partial TPs) puts the real exits elsewhere - and this is the max of the 1m mark series, so it says what PRICE did, not which orders the exchange held. Treat it as a reason to look (/tpsl SYMBOL), not as proof a target was missing.`);
   if (medSl > 0 && medSl < 0.5) findings.push(`Stops are tight: median planned stop is ${medSl.toFixed(2)}% of price, inside normal 1m-5m noise.`);
   if (losses.length && quickLosses / losses.length >= 0.5) findings.push(`${quickLosses} of ${losses.length} losses closed within 5 minutes: entries are being stopped by noise right after opening.`);
+  if (exitVsStop.n >= 3) {
+    if (exitVsStop.shortOfStop / exitVsStop.n >= 0.3) {
+      findings.push(`${exitVsStop.shortOfStop} of ${exitVsStop.n} losing trades closed SHALLOWER than their own planned stop (median move ${exitVsStop.medianShortPct.toFixed(2)}% against a stop at ${exitVsStop.medianShortStopPct.toFixed(2)}%): the stop did not close them. Something else did — a software stop, an agent/manual close, an account-level flatten — or the stop the exchange held was tighter than the one recorded at entry. Compare orders, not prices: /diagnose SYMBOL on a fresh loss.`);
+    }
+    if (exitVsStop.beyondStop / exitVsStop.n >= 0.3) {
+      findings.push(`${exitVsStop.beyondStop} of ${exitVsStop.n} losing trades closed BEYOND their planned stop (median move ${exitVsStop.medianBeyondPct.toFixed(2)}% against a stop at ${exitVsStop.medianBeyondStopPct.toFixed(2)}%): the stop fired late or slipped through its trigger (thin book, or the mark price crossed while the last price did not).`);
+    }
+    if (exitVsStop.atStop / exitVsStop.n >= 0.5) {
+      findings.push(`${exitVsStop.atStop} of ${exitVsStop.n} losing trades closed AT their planned stop: the exits work as designed, so the loss rate is a question of entry quality and stop distance, not of the guard.`);
+    }
+  }
   if (lossHold && winHold && winHold < lossHold * 0.5) findings.push(`Winners are held ${winHold.toFixed(0)} min vs losers ${lossHold.toFixed(0)} min: profits are taken fast, losses are allowed to run.`);
   const worst = reasons[0];
   if (worst && worst.pnl < 0) findings.push(`Biggest loss bucket: close_reason "${worst.reason}" - ${worst.n} trades, PnL ${worst.pnl.toFixed(4)}.`);
@@ -211,6 +247,7 @@ export function summarize(rows, opts = {}) {
       beyondTpHi, beyondTpLo, armedButLost: armed, neverArmed: notArmed, bestMoveBuckets,
     },
     longs, shorts: t.length - longs, entryContext: ctx,
+    exitVsStop,
     reasons, findings,
   };
 }

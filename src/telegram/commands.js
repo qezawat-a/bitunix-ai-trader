@@ -62,12 +62,22 @@ export function createCommandHandler(ctx) {
     async diagnose(chatId, args) {
       const sym = args[0] ? String(args[0]).toUpperCase() : null;
       const d = await diagnose({ symbol: sym });
+      const closed = d.lastClosedTrade;
+      const closedLines = closed ? [
+        '', bold(`📉 Last closed trade · ${closed.symbol} ${closed.side}`),
+        md(`entry ${closed.entry} → exit ${closed.exit} · ${closed.movePct >= 0 ? '+' : ''}${closed.movePct.toFixed(2)}% · held ${closed.holdMin ?? '?'} min · PnL ${Number.isFinite(closed.pnl) ? closed.pnl.toFixed(4) : '?'} USDT`),
+        md(`planned stop ${closed.slPct == null ? '?' : '-' + closed.slPct.toFixed(2) + '%'} · planned TP ${closed.tpPct == null ? 'none recorded' : '+' + closed.tpPct.toFixed(2) + '%'} · category ${closed.category}`),
+        md(closed.verdict),
+        ...closed.reasons.map((r) => md('• ' + r)),
+        ...(closed.events.length ? [md(`events nearby: ${closed.events.map((e) => e.kind).join(', ')}`)] : [md('events nearby: none recorded')]),
+      ] : [];
       if (d.noPositionsTraced) {
         return reply(chatId, [
           bold('🩺 Diagnose'),
           md(`No open position has been evaluated by the guard${sym ? ` for ${sym}` : ''} since this process started.`),
+          ...closedLines,
           md(`Recent failure events: ${d.recentFailureEvents.length}, warn/error logs: ${d.recentWarnErrorLogs.length}.`),
-          '', italic('Ask me in plain words why something did not happen and I will dig into the evidence.'),
+          '', italic(closed ? 'The trade above is the last one that closed on that symbol.' : 'Ask me in plain words why something did not happen and I will dig into the evidence.'),
         ].join('\n'));
       }
       const lines = [bold('🩺 Diagnose')];

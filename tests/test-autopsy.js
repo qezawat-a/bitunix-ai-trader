@@ -114,4 +114,20 @@ ok(unmeasured.findings.some((f) => /only 0 had usable candles/.test(f)), 'and th
 ok(!unmeasured.findings.some((f) => /went PAST their planned TP|went at least half-way|touched their breakeven arming level/.test(f)),
   'no excursion finding is invented from missing candles');
 
+const exits = summarize([
+  T({ exit_price: 99.95, realized_pnl: -0.02 }),   // -0.05% vs a 0.30% stop: the stop did not do this
+  T({ exit_price: 99.94, realized_pnl: -0.02 }),
+  T({ exit_price: 99.93, realized_pnl: -0.02 }),
+  T({ exit_price: 99.70, realized_pnl: -0.05 }),   // -0.30%: right at the stop
+  T({ exit_price: 99.50, realized_pnl: -0.08 }),   // -0.50%: past the stop
+  T({ exit_price: 99.52, realized_pnl: -0.08 }),
+]);
+ok(exits.exitVsStop.n === 6 && exits.exitVsStop.shortOfStop === 3
+  && exits.exitVsStop.atStop === 1 && exits.exitVsStop.beyondStop === 2,
+  `losing exits are split against their OWN stop (${JSON.stringify(exits.exitVsStop)})`);
+ok(exits.findings.some((f) => /closed SHALLOWER than their own planned stop/.test(f)),
+  'a stop that did not close the trade is reported');
+ok(exits.findings.some((f) => /closed BEYOND their planned stop/.test(f)),
+  'an exit past the stop (late fill / slippage) is reported too');
+
 console.log(`\n${passed} passed, ${failed} failed`); process.exit(failed ? 1 : 0);
