@@ -11,6 +11,50 @@ const num = (v) => (v == null || v === '' ? NaN : Number(v));
 const avg = (a) => (a.length ? a.reduce((x, y) => x + y, 0) / a.length : 0);
 const median = (a) => { if (!a.length) return 0; const s = [...a].sort((x, y) => x - y); const m = s.length >> 1; return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2; };
 
+/** Candles, oldest first, from whatever shape the endpoint answered. */
+export function bars(raw) {
+  return (raw || [])
+    .map((k) => ({
+      time: Number(k?.time ?? k?.ts ?? 0),
+      open: Number(k?.open), high: Number(k?.high), low: Number(k?.low), close: Number(k?.close),
+    }))
+    .filter((c) => c.high > 0 && c.low > 0)
+    .sort((a, b) => a.time - b.time);
+}
+
+/**
+ * The candles a trade ACTUALLY lived through.
+ *
+ * get_kline ignores `startTime`: with limit=L it always answers the last L bars
+ * ending at `endTime`. Measured against the live endpoint (2026-11-03, 1m,
+ * limit 200): asking for the window 16:53..16:57 returned 200 bars running from
+ * 13:37 to 16:56 — over three hours BEFORE the trade. That single fact produced
+ * the two headline findings of every autopsy ("13 of 14 stop-outs went past
+ * their planned TP", "all of them reached the breakeven level and still lost"):
+ * the max high of that window belonged to price action from before the position
+ * existed. So the window is paged backwards until it reaches the entry and then
+ * FILTERED to [from, to] — the trade's own life, nothing else.
+ *
+ * `fetchKline` is injectable so this is unit-testable without the network.
+ */
+export async function tradeCandles({
+  symbol, from, to, interval = '1m', type = 'MARK_PRICE',
+  page = 200, maxPages = 6, fetchKline = null,
+}) {
+  const start = Number(from), end = Number(to);
+  if (!(end > 0) || !(start > 0) || end < start) return [];
+  const get = fetchKline || ((q) => bitunix.getKline(q));
+  let all = bars(await get({ symbol, interval, endTime: end, limit: page, type }));
+  for (let i = 0; i < maxPages; i++) {
+    const oldest = all[0]?.time;
+    if (!oldest || oldest <= start) break;
+    const older = bars(await get({ symbol, interval, endTime: oldest - 1, limit: page, type }));
+    if (!older.length) break;
+    all = older.concat(all);
+  }
+  return all.filter((c) => c.time >= start && c.time <= end);
+}
+
 /**
  * How far did price go in favour (mfe) and against (mae) of a trade, in % of
  * entry, over its life? From 1m candles; the entry-minute candle also holds a
@@ -172,10 +216,12 @@ export async function autopsy({ days = 7, excursions = true } = {}) {
         && r.close_reason !== 'inferred_sl_hit') continue;
       try {
         const start = Math.floor(new Date(r.opened_at).getTime() / 60000) * 60000;
+        const end = new Date(r.closed_at).getTime();
         // MARK_PRICE candles: the bot's TP and SL both trigger on the mark price (tpStopType/slStopType),
         // so a last-price wick that never moved the mark price must not count as "touched the target".
-        const raw = await bitunix.getKline({ symbol: r.symbol, interval: '1m', startTime: start, endTime: new Date(r.closed_at).getTime(), limit: 200, type: 'MARK_PRICE' });
-        const candles = (raw || []).map((k) => ({ high: Number(k.high), low: Number(k.low) })).filter((c) => c.high > 0 && c.low > 0);
+        // tradeCandles() walks the window back and filters it: the endpoint ignores startTime,
+        // so asking for a 4-minute window used to answer the previous 200 minutes instead.
+        const candles = await tradeCandles({ symbol: r.symbol, from: start, to: end });
         const ex = excursion(candles, { side: r.side, entry: Number(r.entry_price) });
         if (ex) { r.mfePct = ex.mfePct; r.maePct = ex.maePct; r.mfeAfterEntryPct = ex.mfeAfterEntryPct; done += 1; }
       } catch (e) { note = `candles unavailable for some trades: ${e.message}`; }
@@ -188,7 +234,9 @@ export async function autopsy({ days = 7, excursions = true } = {}) {
       try {
         const end = new Date(r.opened_at).getTime();
         const raw = await bitunix.getKline({ symbol: r.symbol, interval: '5m', startTime: end - 2 * 3600_000, endTime: end, limit: 24 });
-        const candles = (raw || []).map((k) => ({ open: Number(k.open), high: Number(k.high), low: Number(k.low) })).filter((c) => c.high > 0 && c.low > 0 && c.open > 0);
+        // Same trap as the excursion window: filter to the two hours before the
+        // entry instead of trusting the endpoint to honour startTime.
+        const candles = bars(raw).filter((c) => c.time >= end - 2 * 3600_000 && c.time <= end);
         const cx = entryContext(candles, { side: r.side, entry: Number(r.entry_price) });
         if (cx) { r.chase = cx.chase; r.runPct = cx.runPct; n += 1; }
       } catch (e) { note = note || `candles unavailable for some trades: ${e.message}`; }

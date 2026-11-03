@@ -1,4 +1,4 @@
-import { summarize, excursion, entryContext } from '../src/ai/autopsy.js';
+import { summarize, excursion, entryContext, tradeCandles } from '../src/ai/autopsy.js';
 let passed = 0, failed = 0;
 const ok = (c, m) => { c ? (passed++, console.log(`  ok  ${m}`)) : (failed++, console.log(`  FAIL ${m}`)); };
 const T = (o) => ({ symbol: 'X', side: 'LONG', leverage: 10, entry_price: 100, exit_price: 100, sl_price: 99.7, tp_price: 100.9, realized_pnl: 0, close_reason: 'sl', opened_at: '2026-11-01T00:00:00Z', closed_at: '2026-11-01T00:03:00Z', ...o });
@@ -67,4 +67,40 @@ const tpb = summarize([
 ]);
 ok(tpb.stopOuts.beyondTpHi === 2 && tpb.stopOuts.beyondTpLo === 1, 'stop-outs past the planned TP counted with upper and lower bound');
 ok(tpb.findings.some((f) => /went PAST their planned TP/.test(f)), 'past-TP finding');
+console.log('\nThe excursion window is the trade\'s own life, not the 200 bars the endpoint returns');
+{
+  const T0 = Date.UTC(2026, 10, 1, 0, 0, 0);
+  const MIN = 60_000;
+  // 600 minutes of history. A +5% spike sits 100 minutes BEFORE the trade.
+  const series = Array.from({ length: 600 }, (_, i) => ({
+    time: T0 + i * MIN, open: 100,
+    high: i === 400 ? 105 : 100.2,
+    low: i === 400 ? 99.8 : 99.9,
+    close: 100,
+  }));
+  // The live endpoint: `startTime` is IGNORED — it answers the last `limit` bars
+  // ending at `endTime`, newest first. Reproduced exactly, because that is what
+  // made every stop-out "go past its TP" (the spike was in the answer).
+  const fetchKline = async ({ endTime, limit }) => series
+    .filter((c) => c.time <= endTime).slice(-limit).reverse();
+
+  const from = T0 + 500 * MIN;
+  const to = T0 + 504 * MIN;
+  const win = await tradeCandles({ symbol: 'XUSDT', from, to, fetchKline, page: 200 });
+  ok(win.length === 5, `only the bars of the trade are used (${win.length})`);
+  ok(win.every((c) => c.time >= from && c.time <= to), 'and every one of them is inside the trade');
+  const exWin = excursion(win, { side: 'LONG', entry: 100 });
+  ok(Math.abs(exWin.mfePct - 0.2) < 1e-9,
+    `the best move is the trade's own +0.2%, not the +5% spike from before it (${exWin.mfePct})`);
+  const rawPage = series.filter((c) => c.time <= to).slice(-200);
+  ok(excursion(rawPage, { side: 'LONG', entry: 100 }).mfePct > 4,
+    'the unfiltered page would have reported that spike as the trade\'s best move');
+
+  // A trade longer than one page must be paged backwards to cover its own life.
+  const longWin = await tradeCandles({ symbol: 'XUSDT', from: T0 + 100 * MIN, to: T0 + 449 * MIN, fetchKline, page: 200 });
+  ok(longWin.length === 350, `a 350-minute trade gets all 350 bars (${longWin.length})`);
+  ok(await tradeCandles({ symbol: 'XUSDT', from: to, to: from, fetchKline }) .then((x) => x.length) === 0,
+    'an inverted window returns nothing instead of the whole page');
+}
+
 console.log(`\n${passed} passed, ${failed} failed`); process.exit(failed ? 1 : 0);
